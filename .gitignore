@@ -1,0 +1,15 @@
+dist/
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.log
+settings.json*
+moves.json*
+*.tmp
+.env
+.env.*
+*.pfx
+*.key
+*.pem

@@ -1,0 +1,29 @@
+name: Bug 反馈
+description: 报告可复现的问题
+title: '[Bug] '
+body:
+  - type: input
+    id: environment
+    attributes:
+      label: 软件和系统版本
+      placeholder: ClearDesk 0.5.0，Windows 11，缩放 150%，双屏
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从启动软件开始，描述点击或拖动的步骤。
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 预期结果与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 补充信息
+      description: 可以附截图或报错文本。请隐去个人路径和文件内容，不要上传完整 settings.json 或 moves.json。

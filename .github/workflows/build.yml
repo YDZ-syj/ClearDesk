@@ -1,0 +1,49 @@
+name: Windows build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: powershell
+        run: ./build.ps1
+      - name: Test
+        shell: powershell
+        run: ./build.ps1 -Test
+      - name: Package
+        shell: powershell
+        run: |
+          ./tools/package.ps1 -ReleaseDirectory dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClearDesk-packages
+          path: |
+            dist/ClearDesk-*-windows.zip
+            dist/ClearDesk-*-source.zip
+            dist/SHA256SUMS-*.txt
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ClearDesk-packages
+          path: release
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" release/* --draft --prerelease --title "ClearDesk $RELEASE_TAG" --notes-file docs/RELEASE_NOTES_0.5.0.md

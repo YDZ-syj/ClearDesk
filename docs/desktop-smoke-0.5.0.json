@@ -1,0 +1,20 @@
+{
+    "StartupWidgetCount":  2,
+    "StartupFolded":  true,
+    "ToolWindowsExcludedFromAltTab":  true,
+    "DesktopIconsHidden":  true,
+    "ArrowExpands":  true,
+    "LockBlocksMoveAndResize":  true,
+    "LockSaved":  true,
+    "ManualItemOrder":  true,
+    "LockedZoneAllowsItemReorder":  true,
+    "ManualResize":  true,
+    "ExternalFileDrag":  true,
+    "DragOutToDesktop":  true,
+    "ExtractedItemNotRecaptured":  true,
+    "ArrowFoldsCompletely":  true,
+    "NormalExitRestoresFiles":  true,
+    "NormalExitRestoresIcons":  true,
+    "CrashGuardRestoresIcons":  true,
+    "WallpaperProcessesPreserved":  true
+}
