@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -55,6 +56,11 @@ namespace ClearDesk
         public string StartupWarning;
         public IStartupRegistration StartupRegistration;
         public bool StartupSettingsAvailable;
+        public IUpdateChecker UpdateChecker = new GithubUpdateChecker();
+        readonly CancellationTokenSource updateCancellation = new CancellationTokenSource();
+        DispatcherTimer updateTimer;
+        bool updateChecking, updateClosed;
+        AvailableUpdate availableUpdate;
         public string DesktopRoot = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         string testDesktop;
         IEnumerable<string> DesktopRoots() { return testDesktop == null ? new[] { DesktopRoot, Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory) } : new[] { DesktopRoot }; }
@@ -87,6 +93,7 @@ namespace ClearDesk
                 app.InitializeDesktop();
                 app.Manager = new ManagerWindow(app); app.MainWindow = app.Manager;
                 app.SetupTray();
+                app.StartUpdateChecks();
                 if (app.State.WidgetsVisible) app.RebuildWidgets();
                 if (app.StartupWarning != null) MessageBox.Show(app.StartupWarning, "清桌 · 配置恢复");
                 if (app.OrganizerWarning != null) MessageBox.Show(app.OrganizerWarning, "清桌 · 整理记录");
@@ -128,9 +135,69 @@ namespace ClearDesk
             menu.Items.Add("显示 / 隐藏分区", null, delegate { Dispatcher.Invoke(new Action(ToggleWidgets)); });
             menu.Items.Add("全部折叠", null, delegate { Dispatcher.Invoke(new Action(delegate { SetAllCollapsed(true); })); });
             menu.Items.Add("全部展开", null, delegate { Dispatcher.Invoke(new Action(delegate { SetAllCollapsed(false); })); });
+            menu.Items.Add("检查更新", null, delegate { Dispatcher.Invoke(new Action(async delegate { await CheckForUpdates(true); })); });
             menu.Items.Add("退出清桌", null, delegate { Dispatcher.Invoke(new Action(Quit)); });
             tray.ContextMenuStrip = menu;
             tray.DoubleClick += delegate { Dispatcher.Invoke(new Action(ShowManager)); };
+            tray.BalloonTipClicked += delegate { Dispatcher.Invoke(new Action(OpenUpdatePage)); };
+        }
+        void StartUpdateChecks()
+        {
+            updateTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
+            updateTimer.Tick += async delegate
+            {
+                updateTimer.Interval = TimeSpan.FromHours(1);
+                if (UpdateReminderPolicy.IsDue(State, DateTime.UtcNow)) await CheckForUpdates(false);
+            };
+            updateTimer.Start();
+        }
+        public async Task CheckForUpdates(bool manual)
+        {
+            if (updateClosed || updateChecking) { if (manual && Manager != null) Manager.SetStatus("正在检查更新，请稍候…"); return; }
+            if (!manual && !State.AutoUpdateReminder) return;
+            updateChecking = true;
+            if (manual && Manager != null) Manager.SetStatus("正在查询 GitHub 最新公开版本…");
+            if (!manual) { State.LastUpdateCheckUtc = DateTime.UtcNow; Save(); }
+            try
+            {
+                AvailableUpdate update = await UpdateChecker.CheckAsync(AppBrand.Version, updateCancellation.Token);
+                if (updateClosed) return;
+                availableUpdate = update;
+                if (manual)
+                {
+                    if (update == null) MessageBox.Show("当前已是最新公开版本（" + AppBrand.Version + "）。", "清桌 · 检查更新");
+                    else if (MessageBox.Show("发现新版本 " + update.Version + "，当前为 " + AppBrand.Version + "。\n是否打开 GitHub 下载页面？更新不会自动安装。", "清桌 · 发现新版本", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes) OpenUpdatePage();
+                    if (Manager != null) Manager.SetStatus(update == null ? "当前已是最新公开版本。" : "新版本 " + update.Version + " 可在 GitHub 下载。");
+                }
+                else if (UpdateReminderPolicy.ShouldNotify(State, update))
+                {
+                    State.LastNotifiedUpdate = update.Version; Save();
+                    if (Manager != null) Manager.SetStatus("发现新版本 " + update.Version + "，可通过“检查更新”打开下载页面。");
+                    if (tray != null) tray.ShowBalloonTip(10000, "清桌有新版本 " + update.Version, "点击查看 GitHub 下载页面。", Forms.ToolTipIcon.Info);
+                }
+            }
+            catch (Exception)
+            {
+                if (!updateClosed && manual)
+                {
+                    if (Manager != null) Manager.SetStatus("检查更新失败，软件仍可正常使用。");
+                    MessageBox.Show("暂时无法获取 GitHub 版本信息，请检查网络或稍后重试。软件可继续正常使用。", "清桌 · 检查更新", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+            }
+            finally { updateChecking = false; }
+        }
+        public void OpenUpdatePage()
+        {
+            if (availableUpdate == null) return;
+            try { Process.Start(new ProcessStartInfo(availableUpdate.Url) { UseShellExecute = true }); }
+            catch (Exception ex) { MessageBox.Show("无法打开下载页面：" + ex.Message, "清桌"); }
+        }
+        public async void SetAutoUpdateReminder(bool enabled)
+        {
+            bool previous = State.AutoUpdateReminder; State.AutoUpdateReminder = enabled;
+            if (!Save()) { State.AutoUpdateReminder = previous; return; }
+            if (Manager != null) Manager.SetStatus(enabled ? "已开启新版本自动提醒，每天最多查询一次 GitHub。" : "已关闭自动提醒；仍可手动检查更新。");
+            if (enabled && UpdateReminderPolicy.IsDue(State, DateTime.UtcNow)) await CheckForUpdates(false);
         }
         public void ShowManager() { Manager.Show(); Manager.WindowState = WindowState.Normal; Manager.Activate(); }
         public bool Save()
@@ -211,6 +278,7 @@ namespace ClearDesk
         }
         void DisposeDesktop()
         {
+            if (!updateClosed) { updateClosed = true; if (updateTimer != null) updateTimer.Stop(); updateCancellation.Cancel(); updateCancellation.Dispose(); }
             if (desktopTimer != null) desktopTimer.Stop();
             foreach (FileSystemWatcher watcher in desktopWatchers) watcher.Dispose(); desktopWatchers.Clear();
             desktopIcons.Dispose();
@@ -675,6 +743,8 @@ namespace ClearDesk
             AddCheck(menu, "自动分类桌面和新文件", app.State.AutoClassifyDesktop, delegate { app.State.AutoClassifyDesktop = !app.State.AutoClassifyDesktop; if (app.State.AutoClassifyDesktop) ScanDesktop(); else app.Save(); });
             AddCheck(menu, "启动时默认折叠", app.State.StartCollapsed, delegate { app.State.StartCollapsed = !app.State.StartCollapsed; app.Save(); });
             AddStartupOption(menu);
+            Add(menu, "检查更新", async delegate { await app.CheckForUpdates(true); });
+            AddCheck(menu, "自动提醒新版本", app.State.AutoUpdateReminder, delegate { app.SetAutoUpdateReminder(!app.State.AutoUpdateReminder); });
             AddCheck(menu, "退出时恢复已整理文件", app.State.RestoreOnExit, delegate { app.State.RestoreOnExit = !app.State.RestoreOnExit; app.Save(); });
             AddCheck(menu, "折叠展开时自动排布", app.State.AutoArrangeZones, delegate { app.State.AutoArrangeZones = !app.State.AutoArrangeZones; if (app.State.AutoArrangeZones) app.ArrangeZones(true); else app.Save(); });
             AddCheck(menu, "显示分区时收起原桌面图标", app.State.HideDesktopIcons, delegate { app.State.HideDesktopIcons = !app.State.HideDesktopIcons; app.Changed(false); });

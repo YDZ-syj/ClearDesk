@@ -59,6 +59,9 @@ namespace ClearDesk
         [DataMember] public int LayoutRevision { get; set; }
         [DataMember] public List<DesktopEntry> DesktopItems { get; set; }
         [DataMember] public bool RestoreOnExit { get; set; }
+        [DataMember] public bool AutoUpdateReminder { get; set; }
+        [DataMember(EmitDefaultValue = false)] public DateTime LastUpdateCheckUtc { get; set; }
+        [DataMember] public string LastNotifiedUpdate { get; set; }
         [OnDeserializing] void BeforeRead(StreamingContext context)
         { AutoClassifyDesktop = true; AutoArrangeZones = true; StartCollapsed = true; HideDesktopIcons = true; HideEmptyZones = true; RestoreOnExit = true; DesktopItems = new List<DesktopEntry>(); }
         public Settings() { Version = 1; WidgetsVisible = true; Zones = new List<Zone>(); DesktopItems = new List<DesktopEntry>(); RestoreOnExit = true; AutoClassifyDesktop = true; AutoArrangeZones = true; StartCollapsed = true; HideDesktopIcons = true; HideEmptyZones = true; }

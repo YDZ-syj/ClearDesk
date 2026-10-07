@@ -20,6 +20,7 @@
 | `src/ZoneLayout.cs` | 折叠、布局及锁定避让 |
 | `src/AppBrand.cs`、`assets/` | 原创图标与品牌资源 |
 | `src/StartupRegistration.cs` | 当前用户的 Windows 启动项及静默启动参数 |
+| `src/UpdateChecker.cs` | GitHub 公开版本查询、版本比较与提醒节流 |
 | `tests/`、`tools/` | 检查、窗口测试与打包 |
 
 ## 参考
