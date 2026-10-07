@@ -22,6 +22,7 @@
     <Compile Include="src\DesktopIcons.cs"/><Compile Include="src\ZoneLayout.cs"/><Compile Include="src\RenameDialog.cs"/>
     <Compile Include="src\DesktopInteraction.cs"/>
     <Compile Include="src\AppBrand.cs"/>
+    <Compile Include="src\StartupRegistration.cs"/>
     <EmbeddedResource Include="assets\ClearDesk.ico"><LogicalName>ClearDesk.AppIcon</LogicalName></EmbeddedResource>
     <None Include="src\App.config"/><None Include="src\app.manifest"/>
   </ItemGroup>

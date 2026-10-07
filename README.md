@@ -4,15 +4,15 @@
 
 免费、无广告、无遥测的 Windows 开源桌面整理器。把文件、文件夹和软件快捷方式归入半透明灰色分区，数据保存在本机，无需账号。
 
-**[免费下载 Windows 版](https://github.com/YDZ-syj/ClearDesk/releases/tag/v0.5.0)** · [发布记录](https://github.com/YDZ-syj/ClearDesk/releases) · [MIT 许可](LICENSE)
+**[免费下载 Windows 版](https://github.com/YDZ-syj/ClearDesk/releases/tag/v0.5.1)** · [发布记录](https://github.com/YDZ-syj/ClearDesk/releases) · [MIT 许可](LICENSE)
 
-当前版本 **0.5.0（公开测试版）**。需要 Windows 10 / 11 和 .NET Framework 4.8，无需管理员权限。
+当前版本 **0.5.1（公开测试版）**。需要 Windows 10 / 11 和 .NET Framework 4.8，无需管理员权限。
 
 ![管理窗口（模拟文件）](docs/manager-preview.png)
 
 ## 使用
 
-1. 下载 `ClearDesk-0.5.0-windows.zip` 并解压，运行 `ClearDesk.exe`。保留同目录的 `ClearDesk.exe.config` 和 `ClearDesk.IconGuard.exe`。
+1. 下载 `ClearDesk-0.5.1-windows.zip` 并解压，运行 `ClearDesk.exe`。保留同目录的 `ClearDesk.exe.config` 和 `ClearDesk.IconGuard.exe`。
 2. 启动后自动扫描个人及公共桌面，按类型建立分区。默认只建立文件入口，不搬动文件；也可拖入文件或新建自己的分区。
 3. 分区默认折叠。点击箭头展开，拖动标题栏移动，拖动边缘或角落调整大小。右键标题栏可重命名，编辑分区可调整背景浓度。
 4. 点击标题栏「锁定」固定位置和大小，再点「已锁」解锁。锁定后仍可展开、折叠、打开文件和调整文件顺序，状态会保存。
@@ -21,6 +21,8 @@
 7. 关闭管理窗口会收起到托盘；从托盘退出才结束程序。正常退出默认把已整理文件恢复到原位置；也可在「更多」中关闭此选项。
 
 管理窗口支持搜索、配置导入导出、全部展开/折叠及自动分类设置。分区显示时临时隐藏原桌面图标，隐藏分区或退出后恢复；分区不出现在 Alt+Tab 中。
+
+**开机自启：**在管理窗口的「更多 → 开机自启」中勾选或取消，默认关闭。开启后随当前用户登录 Windows 启动，显示分区并将管理窗口收起到托盘；双击托盘图标可打开管理窗口。选择保存在当前用户的 Windows 启动项中，导入分区配置不会改变它。移动软件文件夹后，请在新位置重新开启一次自启；删除软件前先取消勾选。
 
 ## 文件与恢复
 

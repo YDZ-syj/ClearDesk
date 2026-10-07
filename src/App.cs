@@ -53,6 +53,8 @@ namespace ClearDesk
         bool quitting;
         public bool SaveFailed;
         public string StartupWarning;
+        public IStartupRegistration StartupRegistration;
+        public bool StartupSettingsAvailable;
         public string DesktopRoot = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         string testDesktop;
         IEnumerable<string> DesktopRoots() { return testDesktop == null ? new[] { DesktopRoot, Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory) } : new[] { DesktopRoot }; }
@@ -67,23 +69,20 @@ namespace ClearDesk
         [STAThread]
         public static void Main(string[] args)
         {
+            LaunchOptions options;
+            try { options = LaunchOptions.Parse(args); }
+            catch (Exception ex) { MessageBox.Show("无法启动清桌：" + ex.Message, "清桌"); return; }
             bool first;
             instance = new Mutex(true, "Local\\ClearDesk-" + Environment.UserName, out first);
-            if (!first) { MessageBox.Show("清桌已经在运行，请从系统托盘打开管理窗口。", "清桌"); instance.Dispose(); return; }
+            if (!first) { if (!options.AutoStart) MessageBox.Show("清桌已经在运行，请从系统托盘打开管理窗口。", "清桌"); instance.Dispose(); return; }
             DeskApp app = null;
             try
             {
                 app = new DeskApp();
                 app.DispatcherUnhandledException += delegate(object sender, DispatcherUnhandledExceptionEventArgs e)
                 { MessageBox.Show("操作未完成：" + e.Exception.Message, "清桌", MessageBoxButton.OK, MessageBoxImage.Warning); e.Handled = true; };
-                string profile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClearDesk");
-                for (int i = 0; i < args.Length; i += 2)
-                {
-                    if (i + 1 >= args.Length) throw new ArgumentException("启动参数缺少路径。");
-                    if (args[i] == "--profile") profile = Path.GetFullPath(args[i + 1]);
-                    else if (args[i] == "--desktop") app.DesktopRoot = app.testDesktop = Path.GetFullPath(args[i + 1]);
-                    else throw new ArgumentException("未知启动参数：" + args[i]);
-                }
+                string profile = options.Profile ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClearDesk");
+                if (options.Desktop != null) app.DesktopRoot = app.testDesktop = options.Desktop;
                 app.Initialize(profile);
                 app.InitializeDesktop();
                 app.Manager = new ManagerWindow(app); app.MainWindow = app.Manager;
@@ -91,7 +90,7 @@ namespace ClearDesk
                 if (app.State.WidgetsVisible) app.RebuildWidgets();
                 if (app.StartupWarning != null) MessageBox.Show(app.StartupWarning, "清桌 · 配置恢复");
                 if (app.OrganizerWarning != null) MessageBox.Show(app.OrganizerWarning, "清桌 · 整理记录");
-                app.Run(app.Manager);
+                if (options.AutoStart) app.Run(); else app.Run(app.Manager);
             }
             catch (Exception ex) { MessageBox.Show("无法启动清桌：" + ex.Message, "清桌"); }
             finally { if (app != null) app.DisposeDesktop(); instance.ReleaseMutex(); instance.Dispose(); }
@@ -100,6 +99,9 @@ namespace ClearDesk
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             Resources = Theme.Resources();
+            StartupRegistration = new StartupRegistration(System.Reflection.Assembly.GetExecutingAssembly().Location);
+            string defaultProfile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClearDesk");
+            StartupSettingsAvailable = testDesktop == null && string.Equals(Catalog.Normalize(directory), Catalog.Normalize(defaultProfile), StringComparison.OrdinalIgnoreCase);
             Store = new SettingsStore(Path.Combine(directory, "settings.json"));
             try { State = Store.Load(); }
             catch (Exception ex)
@@ -658,6 +660,11 @@ namespace ClearDesk
         }
         void ShowMore()
         {
+            var menu = CreateMoreMenu();
+            menu.Placement = PlacementMode.MousePoint; menu.IsOpen = true;
+        }
+        internal ContextMenu CreateMoreMenu()
+        {
             var menu = new ContextMenu();
             Add(menu, "整理桌面（预览后移动）…", OrganizeDesktop);
             Add(menu, "撤销上次整理…", UndoOrganization);
@@ -667,6 +674,7 @@ namespace ClearDesk
             Add(menu, "自动排好分区", delegate { app.State.AutoArrangeZones = true; app.ArrangeZones(true); });
             AddCheck(menu, "自动分类桌面和新文件", app.State.AutoClassifyDesktop, delegate { app.State.AutoClassifyDesktop = !app.State.AutoClassifyDesktop; if (app.State.AutoClassifyDesktop) ScanDesktop(); else app.Save(); });
             AddCheck(menu, "启动时默认折叠", app.State.StartCollapsed, delegate { app.State.StartCollapsed = !app.State.StartCollapsed; app.Save(); });
+            AddStartupOption(menu);
             AddCheck(menu, "退出时恢复已整理文件", app.State.RestoreOnExit, delegate { app.State.RestoreOnExit = !app.State.RestoreOnExit; app.Save(); });
             AddCheck(menu, "折叠展开时自动排布", app.State.AutoArrangeZones, delegate { app.State.AutoArrangeZones = !app.State.AutoArrangeZones; if (app.State.AutoArrangeZones) app.ArrangeZones(true); else app.Save(); });
             AddCheck(menu, "显示分区时收起原桌面图标", app.State.HideDesktopIcons, delegate { app.State.HideDesktopIcons = !app.State.HideDesktopIcons; app.Changed(false); });
@@ -677,7 +685,31 @@ namespace ClearDesk
             Add(menu, "Wallpaper Engine 兼容说明", ShowWallpaperInfo);
             Add(menu, "关于清桌", delegate { MessageBox.Show("清桌 ClearDesk " + AppBrand.Version + "\n免费开源 · MIT 许可 · 无广告 · 无遥测\n\n支持锁定分区、拖出到桌面、手动排序和边缘缩放。\n分区不会出现在 Alt+Tab 列表。\n正常退出时默认恢复已整理文件；冲突时保留文件并提示。", "关于清桌"); });
             Add(menu, "退出", app.Quit);
-            menu.Placement = PlacementMode.MousePoint; menu.IsOpen = true;
+            return menu;
+        }
+        void AddStartupOption(ContextMenu menu)
+        {
+            var item = new MenuItem { Header = "开机自启", IsCheckable = true, IsEnabled = app.StartupSettingsAvailable, ToolTip = "登录 Windows 后自动显示分区，管理窗口收起到托盘。" };
+            if (!app.StartupSettingsAvailable) item.ToolTip = "隔离配置不修改当前用户的开机自启设置。";
+            else
+            {
+                try { item.IsChecked = app.StartupRegistration.IsEnabled; }
+                catch (Exception ex) { item.IsEnabled = false; item.ToolTip = "无法读取开机自启设置：" + ex.Message; }
+            }
+            item.Click += delegate
+            {
+                try
+                {
+                    app.StartupRegistration.SetEnabled(item.IsChecked);
+                    SetStatus(item.IsChecked ? "已开启开机自启，下次登录 Windows 后自动显示分区。" : "已关闭开机自启。");
+                }
+                catch (Exception ex)
+                {
+                    try { item.IsChecked = app.StartupRegistration.IsEnabled; } catch { item.IsEnabled = false; }
+                    MessageBox.Show("无法修改开机自启设置：\n" + ex.Message, "清桌", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+            };
+            menu.Items.Add(item);
         }
         static void Add(ContextMenu menu, string name, Action action)
         { var m = new MenuItem { Header = name }; m.Click += delegate { action(); }; menu.Items.Add(m); }

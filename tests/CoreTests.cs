@@ -59,6 +59,7 @@ namespace ClearDesk
                 ui.State = s;
                 var manager = new ManagerWindow(ui); ui.Manager = manager;
                 Check(AppBrand.WindowIcon != null && AppBrand.TrayIcon.Width == 32 && manager.Icon != null, "embedded app icon loads for the window and tray");
+                StartupTests.Run(Check, root, ui, manager);
                 ZoneTests.Ui(Check, ui, docs);
                 Render((FrameworkElement)manager.Content, 1120, 700, Path.Combine(args[0], "manager-preview.png"), manager.Background);
                 Check(manager.Content != null, "management UI constructed and rendered without opening desktop windows");

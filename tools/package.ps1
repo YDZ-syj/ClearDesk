@@ -1,4 +1,4 @@
-param([string]$Version = '0.5.0', [string]$ReleaseDirectory = 'dist\v0.5.0')
+param([string]$Version = '0.5.1', [string]$ReleaseDirectory = 'dist\v0.5.1')
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Expected a numeric version.' }
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -9,7 +9,7 @@ New-Item -ItemType Directory -Path $sourceRoot | Out-Null
 $sourceNames = @('src','tests','assets','tools','.github','.gitignore','README.md','LICENSE','CHANGELOG.md','CONTRIBUTING.md','build.ps1','ClearDesk.csproj')
 foreach ($name in $sourceNames) { Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $sourceRoot -Recurse }
 # Include only public documentation; never recursively package local review materials.
-$docNames = @('RELEASE_NOTES_0.5.0.md','RESEARCH.md','TESTING.md','desktop-smoke-0.5.0.json','manager-preview.png')
+$docNames = @('RELEASE_NOTES_0.5.0.md',('RELEASE_NOTES_' + $Version + '.md'),'RESEARCH.md','TESTING.md','desktop-smoke-0.5.0.json','manager-preview.png') | Select-Object -Unique
 New-Item -ItemType Directory -Path (Join-Path $sourceRoot 'docs') | Out-Null
 foreach ($name in $docNames) { Copy-Item -LiteralPath (Join-Path $projectRoot ('docs\' + $name)) -Destination (Join-Path $sourceRoot 'docs') }
 $sourceFiles = @(Get-ChildItem -LiteralPath $sourceRoot -File -Recurse -Force)

@@ -9,7 +9,7 @@ namespace ClearDesk
 {
     public static class AppBrand
     {
-        public const string Version = "0.5.0";
+        public const string Version = "0.5.1";
         // Keep the embedded icon alive for the tray's lifetime.
         static readonly System.Drawing.Icon icon = LoadIcon();
         static readonly ImageSource image = LoadImage();

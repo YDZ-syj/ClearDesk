@@ -46,4 +46,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" release/* --draft --prerelease --title "ClearDesk $RELEASE_TAG" --notes-file docs/RELEASE_NOTES_0.5.0.md
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release already exists; retaining published assets."
+          else
+            gh release create "$RELEASE_TAG" release/* --draft --prerelease --title "ClearDesk $RELEASE_TAG" --notes-file "docs/RELEASE_NOTES_${RELEASE_TAG#v}.md"
+          fi
