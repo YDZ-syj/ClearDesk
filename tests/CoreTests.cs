@@ -52,6 +52,8 @@ namespace ClearDesk
                 invalid = Settings.Default(); invalid.Zones[0].Color = "invalid"; invalid.Zones[0].Width = double.NaN; SettingsStore.Validate(invalid);
                 Check(invalid.Zones[0].Color == "#6875E8" && invalid.Zones[0].Width == 310, "invalid visual values repaired");
                 OrganizerTests.Run(Check, root);
+                AdvantageTests.Run(Check, root);
+                StandaloneTests.Run(Check, root, args[0]);
                 ZoneTests.Run(Check, root);
                 var ui = new DeskApp(); ui.Initialize(Path.GetDirectoryName(store.FilePath));
                 Check(ui.StartupWarning != null && ui.State.Zones.Sum(z => z.Items.Count) == 4, "damaged configuration recovered from backup");
@@ -62,6 +64,7 @@ namespace ClearDesk
                 StartupTests.Run(Check, root, ui, manager);
                 UpdateTests.Run(Check, root, manager);
                 ZoneTests.Ui(Check, ui, docs);
+                AdvantageTests.Ui(Check, ui);
                 Render((FrameworkElement)manager.Content, 1120, 700, Path.Combine(args[0], "manager-preview.png"), manager.Background);
                 Check(manager.Content != null, "management UI constructed and rendered without opening desktop windows");
                 docs.Collapsed = false;

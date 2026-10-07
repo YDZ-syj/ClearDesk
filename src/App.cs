@@ -41,7 +41,7 @@ namespace ClearDesk
         }
     }
 
-    public class DeskApp : Application
+    public partial class DeskApp : Application
     {
         public Settings State;
         public SettingsStore Store;
@@ -71,20 +71,27 @@ namespace ClearDesk
         DispatcherTimer desktopTimer;
         int desktopDirty;
         bool desktopInitialized;
+        bool demo;
+        EventHandler displayChange;
 
         [STAThread]
         public static void Main(string[] args)
         {
+            if (args.Length > 0 && args[0] == "--icon-guard") { IconGuard.Main(args.Skip(1).ToArray()); return; }
+            IconGuard.SelfExecutable = System.Reflection.Assembly.GetExecutingAssembly().Location;
             LaunchOptions options;
             try { options = LaunchOptions.Parse(args); }
             catch (Exception ex) { MessageBox.Show("无法启动清桌：" + ex.Message, "清桌"); return; }
             bool first;
-            instance = new Mutex(true, "Local\\ClearDesk-" + Environment.UserName, out first);
+            string instanceName = "Local\\ClearDesk-" + Environment.UserName;
+            if (options.Demo) using (var hash = System.Security.Cryptography.SHA256.Create()) instanceName = "Local\\ClearDesk-Demo-" + BitConverter.ToString(hash.ComputeHash(System.Text.Encoding.UTF8.GetBytes(options.Profile))).Replace("-", "");
+            instance = new Mutex(true, instanceName, out first);
             if (!first) { if (!options.AutoStart) MessageBox.Show("清桌已经在运行，请从系统托盘打开管理窗口。", "清桌"); instance.Dispose(); return; }
             DeskApp app = null;
             try
             {
                 app = new DeskApp();
+                app.demo = options.Demo;
                 app.DispatcherUnhandledException += delegate(object sender, DispatcherUnhandledExceptionEventArgs e)
                 { MessageBox.Show("操作未完成：" + e.Exception.Message, "清桌", MessageBoxButton.OK, MessageBoxImage.Warning); e.Handled = true; };
                 string profile = options.Profile ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClearDesk");
@@ -122,6 +129,7 @@ namespace ClearDesk
             try
             {
                 Organizer = new DesktopOrganizer(Path.Combine(directory, "moves.json"));
+                EntryTracking.Reconcile(State, Organizer);
                 var messages = Organizer.Recover(State, delegate { Store.Save(State); });
                 if (messages.Count > 0) OrganizerWarning = string.Join("\n", messages.Take(5));
             }
@@ -153,6 +161,7 @@ namespace ClearDesk
         }
         public async Task CheckForUpdates(bool manual)
         {
+            if (FileOperationBusy) { if (manual && Manager != null) Manager.SetStatus("请等待文件操作完成后再检查更新。"); return; }
             if (updateClosed || updateChecking) { if (manual && Manager != null) Manager.SetStatus("正在检查更新，请稍候…"); return; }
             if (!manual && !State.AutoUpdateReminder) return;
             updateChecking = true;
@@ -161,6 +170,7 @@ namespace ClearDesk
             try
             {
                 AvailableUpdate update = await UpdateChecker.CheckAsync(AppBrand.Version, updateCancellation.Token);
+                if (FileOperationBusy) await fileCompletion.Task;
                 if (updateClosed) return;
                 availableUpdate = update;
                 if (manual)
@@ -202,6 +212,7 @@ namespace ClearDesk
         public void ShowManager() { Manager.Show(); Manager.WindowState = WindowState.Normal; Manager.Activate(); }
         public bool Save()
         {
+            if (FileOperationBusy) return true;
             try { Store.Save(State); SaveFailed = false; return true; }
             catch (Exception ex) { SaveFailed = true; MessageBox.Show("配置未保存，请检查磁盘空间和写入权限。\n" + ex.Message, "清桌", MessageBoxButton.OK, MessageBoxImage.Warning); return false; }
         }
@@ -210,7 +221,7 @@ namespace ClearDesk
             Save(); if (Manager != null) Manager.Refresh();
             if (rebuild) RebuildWidgets(); else { foreach (ZoneWindow w in widgets) w.RefreshItems(); RefreshDesktopItems(); ApplyDesktopVisibility(); }
         }
-        public void ToggleWidgets() { State.WidgetsVisible = !State.WidgetsVisible; Changed(true); }
+        public void ToggleWidgets() { if (FileOperationBusy) return; State.WidgetsVisible = !State.WidgetsVisible; Changed(true); }
         public void RebuildWidgets()
         {
             desktopIcons.Apply(false);
@@ -228,7 +239,7 @@ namespace ClearDesk
         public void InitializeDesktop()
         {
             desktopInitialized = true;
-            try { if (State.AutoClassifyDesktop) Catalog.Classify(State, ScanDesktopPaths()); }
+            try { EntryTracking.Reconcile(State, Organizer); if (State.AutoClassifyDesktop) Catalog.Classify(State, ScanDesktopPaths()); }
             catch (Exception ex) { StartupWarning = (StartupWarning ?? "") + "\n桌面自动分类未完成：" + ex.Message; }
             Catalog.AddSystemEntries(State);
             Rect area = SystemParameters.WorkArea;
@@ -249,30 +260,41 @@ namespace ClearDesk
                 catch { }
             }
             desktopTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-            desktopTimer.Tick += delegate
+            int trackingTicks = 0;
+            desktopTimer.Tick += async delegate
             {
-                if (State.AutoClassifyDesktop && Interlocked.Exchange(ref desktopDirty, 0) != 0)
+                if (FileOperationBusy || quitting || modalDepth > 0 || Mouse.LeftButton == MouseButtonState.Pressed) return;
+                if (Interlocked.Exchange(ref desktopDirty, 0) != 0 || ++trackingTicks >= 5)
                 {
+                    trackingTicks = 0;
                     try
                     {
-                        var visibleBefore = Catalog.VisibleZones(State).Select(z => z.Id).ToArray();
-                        int added = Catalog.Classify(State, ScanDesktopPaths());
-                        if (added > 0)
+                        await RunBackground("同步桌面入口…", delegate(Settings state, Func<bool> cancelled, Action<int, int, string> progress)
                         {
-                            bool layoutChanged = !visibleBefore.SequenceEqual(Catalog.VisibleZones(State).Select(z => z.Id));
-                            if (layoutChanged && State.AutoArrangeZones) ArrangeZones(false);
-                            Changed(true);
-                        }
+                            EntryTracking.Reconcile(state, Organizer);
+                            if (state.AutoClassifyDesktop) Catalog.Classify(state, ScanDesktopPaths());
+                            return true;
+                        }, true);
                     }
                     catch (Exception ex) { if (Manager != null) Manager.SetStatus("自动分类暂未完成：" + ex.Message); Interlocked.Exchange(ref desktopDirty, 1); }
                 }
                 ApplyDesktopVisibility();
             };
             desktopTimer.Start();
+            displayChange = delegate
+            {
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (quitting || FileOperationBusy) return;
+                    foreach (ZoneWindow window in widgets) DesktopWindows.EnsureAccessible(window);
+                    foreach (DesktopItemWindow window in desktopItems) DesktopWindows.EnsureAccessible(window);
+                }));
+            };
+            Microsoft.Win32.SystemEvents.DisplaySettingsChanged += displayChange;
         }
         void ApplyDesktopVisibility()
         {
-            if (!desktopInitialized) return;
+            if (!desktopInitialized || demo) return;
             desktopIcons.Apply(State.HideDesktopIcons && State.WidgetsVisible && (widgets.Any(w => w.IsVisible) || State.DesktopItems.Count > 0));
             if (desktopIcons.Warning != null && Manager != null) Manager.SetStatus(desktopIcons.Warning);
         }
@@ -280,6 +302,7 @@ namespace ClearDesk
         {
             if (!updateClosed) { updateClosed = true; if (updateTimer != null) updateTimer.Stop(); updateCancellation.Cancel(); updateCancellation.Dispose(); }
             if (desktopTimer != null) desktopTimer.Stop();
+            if (displayChange != null) { Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= displayChange; displayChange = null; }
             foreach (FileSystemWatcher watcher in desktopWatchers) watcher.Dispose(); desktopWatchers.Clear();
             desktopIcons.Dispose();
         }
@@ -297,6 +320,7 @@ namespace ClearDesk
         }
         public void SetAllCollapsed(bool collapsed)
         {
+            if (FileOperationBusy) return;
             foreach (Zone zone in State.Zones) zone.Collapsed = collapsed;
             if (State.AutoArrangeZones) ArrangeZones(false);
             Changed(true);
@@ -304,12 +328,14 @@ namespace ClearDesk
         public void RenameZone(Zone zone, Window owner)
         {
             var dialog = new RenameDialog(State, zone); dialog.Owner = owner;
-            if (dialog.ShowDialog() == true) Changed(true);
+            if (ShowModal(() => dialog.ShowDialog()) == true) Changed(true);
         }
-        public void Quit()
+        public async void Quit()
         {
             if (quitting) return;
-            if (State.RestoreOnExit && !RestoreDesktop(false)) { ShowManager(); return; }
+            if (FileOperationBusy) { quitAfterOperation = true; CancelFileOperation(); if (Manager != null) Manager.SetStatus("正在停止当前操作，完成后退出…"); return; }
+            if (State.RestoreOnExit && !await RestoreDesktopAsync(false)) { ShowManager(); return; }
+            if (!desktopIcons.TryRestore()) { ShowManager(); MessageBox.Show(desktopIcons.Warning, "清桌 · 桌面图标尚未恢复"); return; }
             if (!Save() && MessageBox.Show("配置尚未保存，仍然退出？", "清桌", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
             quitting = true;
             DisposeDesktop();
@@ -318,32 +344,26 @@ namespace ClearDesk
             if (tray != null) tray.Dispose();
             Shutdown();
         }
-        public bool Confirm(string text) { return MessageBox.Show(text, "清桌", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes; }
-        public bool RestoreDesktop(bool notify)
-        {
-            try
-            {
-                if (Organizer == null) { if (OrganizerWarning != null) throw new IOException(OrganizerWarning); return true; }
-                List<string> errors = Organizer.UndoAll(State, delegate { Store.Save(State); });
-                Changed(true);
-                if (errors.Count > 0) { MessageBox.Show("部分文件暂未恢复，文件仍保留在收纳目录。请解决同名冲突后重试：\n\n" + string.Join("\n", errors.Take(8)), "恢复桌面未完成"); return false; }
-                if (notify) MessageBox.Show("已整理的文件已恢复到原桌面位置，未覆盖其他文件。", "清桌");
-                return true;
-            }
-            catch (Exception ex) { MessageBox.Show("恢复未完成，程序将保持打开。\n" + ex.Message, "清桌"); return false; }
-        }
+        public bool Confirm(string text) { return ShowModal(() => MessageBox.Show(text, "清桌", MessageBoxButton.YesNo, MessageBoxImage.Question)) == MessageBoxResult.Yes; }
         void RefreshDesktopItems()
         {
             foreach (DesktopItemWindow w in desktopItems) w.DisposeWindow(); desktopItems.Clear();
             if (!desktopInitialized || !State.WidgetsVisible || !State.HideDesktopIcons) return;
             foreach (DesktopEntry item in State.DesktopItems) { var w = new DesktopItemWindow(this, item); desktopItems.Add(w); w.Show(); }
         }
-        public void ExtractToDesktop(Zone zone, Entry entry, Point point)
+        public async void ExtractToDesktop(Zone zone, Entry entry, Point point)
         {
             try
             {
-                DesktopTransfer.Extract(State, Organizer, zone, entry, DesktopRoot, point.X - 45, point.Y - 30, delegate { Store.Save(State); });
-                Changed(true);
+                string zoneId = zone == null ? null : zone.Id; int index = zone == null ? State.DesktopItems.FindIndex(d => d.Entry == entry) : zone.Items.IndexOf(entry);
+                await RunBackground("正在放回桌面…", delegate(Settings state, Func<bool> cancelled, Action<int, int, string> progress)
+                {
+                    Zone source = zoneId == null ? null : state.Zones.First(z => z.Id == zoneId);
+                    Entry item = source == null ? state.DesktopItems[index].Entry : source.Items[index];
+                    EntryTracking.Reconcile(state, Organizer);
+                    DesktopTransfer.Extract(state, Organizer, source, item, DesktopRoot, point.X - 45, point.Y - 30, delegate { Store.Save(state); }, cancelled);
+                    return true;
+                });
                 if (Manager != null) Manager.SetStatus("已放回桌面；此入口不再自动收进分区。");
             }
             catch (Exception ex) { MessageBox.Show("未能拖出，原文件已保留。\n" + ex.Message, "清桌"); }
@@ -390,22 +410,24 @@ namespace ClearDesk
                 AddMenu(menu, "放回桌面", delegate { ExtractToDesktop(zone, entry, new Point(SystemParameters.WorkArea.Left + 60, SystemParameters.WorkArea.Top + 60)); });
             }
             AddMenu(menu, "移除入口（保留原文件）", delegate { if (zone != null) zone.Items.Remove(entry); else State.DesktopItems.RemoveAll(d => d.Entry == entry); Changed(false); });
+            ProtectMenu(menu);
             return menu;
         }
         static void AddMenu(ContextMenu menu, string text, Action action)
-        { var item = new MenuItem { Header = text }; item.Click += delegate { action(); }; menu.Items.Add(item); }
+        { var item = new MenuItem { Header = text }; item.Click += delegate { var app = Application.Current as DeskApp; if (app == null || !app.FileOperationBusy) action(); }; menu.Items.Add(item); }
         public void AddFiles(Zone zone)
         {
             var dialog = new Microsoft.Win32.OpenFileDialog { Multiselect = true, Title = "添加文件、快捷方式或程序", Filter = "所有文件|*.*", DereferenceLinks = false };
-            if (dialog.ShowDialog() == true) { Catalog.Add(zone, dialog.FileNames); Changed(false); }
+            if (ShowModal(() => dialog.ShowDialog()) == true) { Catalog.Add(zone, dialog.FileNames); Changed(false); }
         }
         public void AddFolder(Zone zone)
         {
             using (var dialog = new Forms.FolderBrowserDialog { Description = "选择要加入分区的文件夹" })
-                if (dialog.ShowDialog() == Forms.DialogResult.OK) { Catalog.Add(zone, new[] { dialog.SelectedPath }); Changed(false); }
+                if (ShowModal(() => dialog.ShowDialog()) == Forms.DialogResult.OK) { Catalog.Add(zone, new[] { dialog.SelectedPath }); Changed(false); }
         }
         public void Drop(Zone zone, DragEventArgs e, Entry before = null)
         {
+            if (FileOperationBusy) { e.Handled = true; return; }
             if (e.Data.GetDataPresent("ClearDesk.Entry"))
             {
                 var data = (DraggedEntry)e.Data.GetData("ClearDesk.Entry");
@@ -422,7 +444,7 @@ namespace ClearDesk
         public void EditZone(Zone zone, bool create)
         {
             var dialog = new ZoneDialog(zone, State); dialog.Owner = Manager;
-            if (dialog.ShowDialog() != true) return;
+            if (ShowModal(() => dialog.ShowDialog()) != true) return;
             Catalog.Rename(State, zone, dialog.ZoneName); zone.Color = dialog.ZoneColor; zone.BackgroundOpacity = dialog.ZoneOpacity;
             if (create) State.Zones.Add(zone);
             if (State.AutoArrangeZones) ArrangeZones(false);
@@ -539,6 +561,9 @@ namespace ClearDesk
         readonly TextBlock status = Theme.Text("", 12, "#A0ABC6");
         readonly TextBox search = new TextBox();
         readonly Button widgetButton;
+        readonly Button cancelOperation;
+        readonly ProgressBar fileProgress = new ProgressBar { Height = 8, Visibility = Visibility.Collapsed, Margin = new Thickness(0, 0, 12, 0) };
+        readonly List<UIElement> fileControls = new List<UIElement>();
         Zone selected;
         public ManagerWindow(DeskApp application)
         {
@@ -547,6 +572,7 @@ namespace ClearDesk
             Background = Theme.Brush("#121725"); Foreground = Brushes.White; FontFamily = new FontFamily("Microsoft YaHei UI"); WindowStartupLocation = WindowStartupLocation.CenterScreen;
             var root = new Grid(); root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(228) }); root.ColumnDefinitions.Add(new ColumnDefinition()); Content = root;
             var sidebar = new Border { Background = Theme.Brush("#191F30"), Padding = new Thickness(22, 26, 22, 20) }; root.Children.Add(sidebar);
+            fileControls.Add(sidebar);
             var side = new DockPanel(); sidebar.Child = side;
             var brand = new StackPanel(); DockPanel.SetDock(brand, Dock.Top); side.Children.Add(brand);
             var brandRow = new StackPanel { Orientation = Orientation.Horizontal };
@@ -568,8 +594,10 @@ namespace ClearDesk
             search.ToolTip = "搜索所有分区：文件名或路径"; searchBox.Children.Add(search);
             var searchHint = Theme.Text("搜索文件名或路径…", 14, "#8F9BBA"); searchHint.Margin = new Thickness(13, 11, 0, 0); searchHint.IsHitTestVisible = false; searchBox.Children.Add(searchHint);
             search.TextChanged += delegate { searchHint.Visibility = search.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed; RefreshEntries(); }; Grid.SetRow(searchBox, 1); main.Children.Add(searchBox);
+            fileControls.Add(searchBox);
             var section = new StackPanel(); Grid.SetRow(section, 2); main.Children.Add(section);
             section.Children.Add(zoneTitle); zoneSubtitle.Margin = new Thickness(0, 8, 0, 14); section.Children.Add(zoneSubtitle); toolbar.Margin = new Thickness(0, 0, 0, 18); section.Children.Add(toolbar);
+            fileControls.Add(section);
             var listBorder = new Border { Background = Theme.Brush("#171D2D"), CornerRadius = new CornerRadius(12), Padding = new Thickness(12), AllowDrop = true };
             listBorder.DragOver += DeskApp.DragOver;
             listBorder.Drop += delegate(object sender, DragEventArgs e)
@@ -580,15 +608,26 @@ namespace ClearDesk
             };
             listBorder.Child = new ScrollViewer { Content = entries, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
             Grid.SetRow(listBorder, 3); main.Children.Add(listBorder);
+            fileControls.Add(listBorder); fileControls.Add(heading);
             var bottom = new DockPanel { Margin = new Thickness(0, 18, 0, 0) }; Grid.SetRow(bottom, 4); main.Children.Add(bottom);
             var hide = Theme.Button("收起到托盘", Hide, false); DockPanel.SetDock(hide, Dock.Right); bottom.Children.Add(hide); bottom.Children.Add(status);
+            cancelOperation = Theme.Button("取消当前操作", app.CancelFileOperation, false); cancelOperation.Visibility = Visibility.Collapsed; DockPanel.SetDock(cancelOperation, Dock.Right); bottom.Children.Insert(1, cancelOperation);
+            DockPanel.SetDock(fileProgress, Dock.Bottom); bottom.Children.Insert(0, fileProgress);
             Closing += delegate(object sender, System.ComponentModel.CancelEventArgs e) { e.Cancel = true; Hide(); };
             Refresh(); SetStatus("提示：拖入文件自动分类；双击打开；右键管理入口。");
         }
         public void SetStatus(string message) { status.Text = app.SaveFailed ? "配置未保存，请检查写入权限。" : message; }
+        public void SetFileBusy(bool busy, bool quiet)
+        {
+            foreach (UIElement control in fileControls) control.IsEnabled = !busy;
+            cancelOperation.Visibility = fileProgress.Visibility = busy && !quiet ? Visibility.Visible : Visibility.Collapsed;
+            fileProgress.IsIndeterminate = busy; cancelOperation.IsEnabled = busy;
+        }
+        public void ReportFileProgress(int current, int total, string name)
+        { fileProgress.IsIndeterminate = false; fileProgress.Maximum = Math.Max(1, total); fileProgress.Value = current; SetStatus(current + " / " + total + " · " + name); }
         public void Refresh()
         {
-            if (selected != null && !app.State.Zones.Contains(selected)) selected = null;
+            if (selected != null) selected = app.State.Zones.FirstOrDefault(z => z.Id == selected.Id);
             navigation.Children.Clear();
             navigation.Children.Add(new TextBlock { Text = "我的分区", Foreground = Theme.Brush("#929DBA"), FontSize = 11, Margin = new Thickness(0, 0, 0, 12) });
             AddNavigation("全部入口", null, app.State.Zones.Sum(z => z.Items.Count), "#A0ABC6");
@@ -600,7 +639,7 @@ namespace ClearDesk
                 toolbar.Children.Add(Theme.Button("整理桌面（移动文件）", OrganizeDesktop, true));
                 toolbar.Children.Add(Theme.Button("仅扫描入口", ScanDesktop, false));
                 toolbar.Children.Add(Theme.Button("撤销上次整理", UndoOrganization, false));
-                toolbar.Children.Add(Theme.Button("恢复全部到桌面", delegate { app.RestoreDesktop(true); }, false));
+                toolbar.Children.Add(Theme.Button("恢复全部到桌面", async delegate { await app.RestoreDesktopAsync(true); }, false));
                 toolbar.Children.Add(Theme.Button("全部折叠", delegate { app.SetAllCollapsed(true); }, false));
             }
             else
@@ -626,6 +665,7 @@ namespace ClearDesk
                 Add(menu, "重命名分区…", delegate { app.RenameZone(zone, this); });
                 Add(menu, "外观设置…", delegate { app.EditZone(zone, false); });
                 Add(menu, "删除分区", delegate { selected = zone; DeleteZone(); });
+                app.ProtectMenu(menu);
                 b.ContextMenu = menu;
             }
         }
@@ -650,12 +690,17 @@ namespace ClearDesk
                 entries.Children.Add(empty);
             }
         }
-        void ScanDesktop()
+        async void ScanDesktop()
         {
-            try { int count = Catalog.Classify(app.State, app.ScanDesktopPaths()); if (app.State.AutoArrangeZones) app.ArrangeZones(false); app.Changed(true); SetStatus("已添加 " + count + " 个入口，重复入口已跳过。原文件未移动。"); }
+            try
+            {
+                int count = await app.RunBackground("正在扫描桌面…", delegate(Settings state, Func<bool> cancelled, Action<int, int, string> progress)
+                { EntryTracking.Reconcile(state, app.Organizer); return Catalog.Classify(state, app.ScanDesktopPaths()); });
+                if (app.State.AutoArrangeZones) app.ArrangeZones(true); SetStatus("已添加 " + count + " 个入口，重复入口已跳过。原文件未移动。");
+            }
             catch (Exception ex) { MessageBox.Show("桌面扫描未完成：" + ex.Message, "清桌"); }
         }
-        void OrganizeDesktop()
+        async void OrganizeDesktop()
         {
             if (app.Organizer == null) { MessageBox.Show(app.OrganizerWarning ?? "文件整理当前不可用。", "清桌"); return; }
             try
@@ -664,57 +709,52 @@ namespace ClearDesk
                 string library = app.State.LibraryPath;
                 if (string.IsNullOrWhiteSpace(library)) library = Path.Combine(Path.GetDirectoryName(desktop), "ClearDesk Library");
                 // Desktop imports are metadata only. Actual movement happens after this dialog's confirmation.
-                Catalog.Classify(app.State, Catalog.DesktopPaths()); app.Changed(false);
                 while (true)
                 {
-                    MoveBatch batch = app.Organizer.Plan(app.State, desktop, library, AppDomain.CurrentDomain.BaseDirectory);
+                    MoveBatch batch = await app.RunBackground("准备整理预览…", delegate(Settings state, Func<bool> cancelled, Action<int, int, string> progress)
+                    { EntryTracking.Reconcile(state, app.Organizer); Catalog.Classify(state, app.ScanDesktopPaths()); return app.Organizer.Plan(state, desktop, library, AppDomain.CurrentDomain.BaseDirectory); });
                     var preview = new MovePreviewDialog(app.State, batch, false); preview.Owner = this;
-                    if (preview.ShowDialog() != true) return;
+                    if (app.ShowModal(() => preview.ShowDialog()) != true) return;
                     if (preview.ChangeFolder)
                     {
                         using (var picker = new Forms.FolderBrowserDialog { Description = "选择桌面之外、同一个盘上的收纳目录", SelectedPath = library })
-                        { if (picker.ShowDialog() != Forms.DialogResult.OK) return; library = picker.SelectedPath; }
+                        { if (app.ShowModal(() => picker.ShowDialog()) != Forms.DialogResult.OK) return; library = picker.SelectedPath; }
                         continue;
                     }
+                    batch.Moves = preview.SelectedMoves;
                     if (batch.Moves.Count == 0) return;
-                    app.State.LibraryPath = library;
-                    RunFileOperation(delegate
+                    var errors = await app.RunBackground("正在整理文件…", delegate(Settings state, Func<bool> cancelled, Action<int, int, string> progress)
                     {
-                        app.Store.Save(app.State);
-                        var errors = app.Organizer.Execute(app.State, batch, delegate { app.Store.Save(app.State); });
-                        app.State.WidgetsVisible = true; app.Changed(true);
-                        int moved = batch.Moves.Count(m => m.Status == "moved");
-                        SetStatus("已移动 " + moved + " 项，原位置的图标已移除。收纳目录：" + library);
-                        if (errors.Count > 0) MessageBox.Show("已移动 " + moved + " 项；" + errors.Count + " 项未移动，原文件保留。\n\n" + string.Join("\n", errors.Take(8)), "清桌 · 整理结果");
+                        state.LibraryPath = library;
+                        var result = app.Organizer.Execute(state, batch, delegate { app.Store.Save(state); }, cancelled, progress);
+                        state.WidgetsVisible = true; return result;
                     });
+                    int moved = batch.Moves.Count(m => m.Status == "moved");
+                    SetStatus("已移动 " + moved + " / " + batch.Moves.Count + " 项。未执行项目保留原位置，可恢复已移动项目。");
+                    if (errors.Count > 0) MessageBox.Show("部分项目未移动，原文件保留：\n\n" + string.Join("\n", errors.Take(8)), "清桌 · 整理结果");
                     return;
                 }
             }
             catch (Exception ex) { MessageBox.Show("无法准备整理：" + ex.Message, "清桌"); }
         }
-        void UndoOrganization()
+        async void UndoOrganization()
         {
+            try
+            {
             if (app.Organizer == null) { MessageBox.Show(app.OrganizerWarning ?? "撤销当前不可用。", "清桌"); return; }
+            await app.RunBackground("准备恢复预览…", delegate(Settings state, Func<bool> cancelled, Action<int, int, string> progress) { return EntryTracking.Reconcile(state, app.Organizer); });
             var batch = app.Organizer.UndoBatch;
             if (batch == null) { MessageBox.Show("没有可以撤销的整理记录。", "清桌"); return; }
             var preview = new MovePreviewDialog(app.State, batch, true); preview.Owner = this;
-            if (preview.ShowDialog() != true) return;
-            RunFileOperation(delegate
+            if (app.ShowModal(() => preview.ShowDialog()) != true) return;
+            var errors = await app.RunBackground("正在恢复勾选文件…", delegate(Settings state, Func<bool> cancelled, Action<int, int, string> progress)
             {
-                var errors = app.Organizer.Undo(app.State, delegate { app.Store.Save(app.State); });
-                app.Changed(false); SetStatus(errors.Count == 0 ? "已撤销上次整理，文件恢复到原桌面位置。" : "部分文件无法撤销，移动记录已保留。");
-                if (errors.Count > 0) MessageBox.Show("以下文件尚未恢复；没有覆盖任何文件。\n\n" + string.Join("\n", errors.Take(8)), "清桌 · 撤销结果");
+                return app.Organizer.UndoSelected(state, batch, preview.SelectedMoves, delegate { app.Store.Save(state); }, cancelled, progress);
             });
-        }
-        void RunFileOperation(Action action)
-        {
-            SetStatus("正在处理文件，请稍候…"); Cursor = Cursors.Wait; IsEnabled = false;
-            Dispatcher.BeginInvoke(new Action(delegate
-            {
-                try { action(); }
-                catch (Exception ex) { Refresh(); MessageBox.Show("操作已停止，已保存的移动记录可用于恢复。\n" + ex.Message, "清桌"); }
-                finally { Cursor = null; IsEnabled = true; }
-            }), DispatcherPriority.Background);
+            SetStatus("恢复操作已结束，未恢复项目的记录仍保留，可继续恢复。");
+            if (errors.Count > 0) MessageBox.Show("以下文件尚未恢复；没有覆盖任何文件。\n\n" + string.Join("\n", errors.Take(8)), "清桌 · 撤销结果");
+            }
+            catch (Exception ex) { MessageBox.Show("恢复未完成，已保存记录可用于重试。\n" + ex.Message, "清桌"); }
         }
         void ShowWallpaperInfo()
         {
@@ -751,10 +791,13 @@ namespace ClearDesk
             AddCheck(menu, "隐藏空的默认分类", app.State.HideEmptyZones, delegate { app.State.HideEmptyZones = !app.State.HideEmptyZones; if (app.State.AutoArrangeZones) app.ArrangeZones(false); app.Changed(true); });
             Add(menu, "导出配置备份…", Export);
             Add(menu, "导入配置备份…", Import);
+            Add(menu, "完整备份（含移动记录）…", BackupProfile);
+            Add(menu, "归档已完成整理记录", ArchiveHistory);
             Add(menu, "查看本地配置文件夹", delegate { Directory.CreateDirectory(Path.GetDirectoryName(app.Store.FilePath)); Process.Start("explorer.exe", Path.GetDirectoryName(app.Store.FilePath)); });
             Add(menu, "Wallpaper Engine 兼容说明", ShowWallpaperInfo);
             Add(menu, "关于清桌", delegate { MessageBox.Show("清桌 ClearDesk " + AppBrand.Version + "\n免费开源 · MIT 许可 · 无广告 · 无遥测\n\n支持锁定分区、拖出到桌面、手动排序和边缘缩放。\n分区不会出现在 Alt+Tab 列表。\n正常退出时默认恢复已整理文件；冲突时保留文件并提示。", "关于清桌"); });
             Add(menu, "退出", app.Quit);
+            app.ProtectMenu(menu);
             return menu;
         }
         void AddStartupOption(ContextMenu menu)
@@ -782,20 +825,21 @@ namespace ClearDesk
             menu.Items.Add(item);
         }
         static void Add(ContextMenu menu, string name, Action action)
-        { var m = new MenuItem { Header = name }; m.Click += delegate { action(); }; menu.Items.Add(m); }
+        { var m = new MenuItem { Header = name }; m.Click += delegate { var application = Application.Current as DeskApp; if (application == null || !application.FileOperationBusy) action(); }; menu.Items.Add(m); }
         static void AddCheck(ContextMenu menu, string name, bool value, Action action)
-        { var m = new MenuItem { Header = name, IsCheckable = true, IsChecked = value }; m.Click += delegate { action(); }; menu.Items.Add(m); }
+        { var m = new MenuItem { Header = name, IsCheckable = true, IsChecked = value }; m.Click += delegate { var application = Application.Current as DeskApp; if (application == null || !application.FileOperationBusy) action(); }; menu.Items.Add(m); }
         void Export()
         {
             var d = new Microsoft.Win32.SaveFileDialog { FileName = "ClearDesk-backup.json", Filter = "清桌配置|*.json" };
-            if (d.ShowDialog() != true) return;
+            if (app.ShowModal(() => d.ShowDialog()) != true) return;
             try { new SettingsStore(d.FileName).Save(app.State); SetStatus("配置备份已导出（不包含原文件）。"); }
             catch (Exception ex) { MessageBox.Show("导出失败：" + ex.Message, "清桌"); }
         }
         void Import()
         {
+            if (app.Organizer == null || app.Organizer.UndoBatch != null) { MessageBox.Show("请先恢复已整理文件，并确认移动记录可读，再导入配置。", "清桌"); return; }
             var d = new Microsoft.Win32.OpenFileDialog { Filter = "清桌配置|*.json" };
-            if (d.ShowDialog() != true) return;
+            if (app.ShowModal(() => d.ShowDialog()) != true) return;
             try
             {
                 Settings imported = SettingsStore.Read(d.FileName);
@@ -805,6 +849,28 @@ namespace ClearDesk
                 selected = null; Refresh(); app.RebuildWidgets(); SetStatus("配置已导入，未打开任何文件。");
             }
             catch (Exception ex) { MessageBox.Show("无法导入配置：" + ex.Message, "清桌"); }
+        }
+        async void BackupProfile()
+        {
+            var dialog = new Microsoft.Win32.SaveFileDialog { FileName = "ClearDesk-profile-backup.zip", Filter = "清桌完整配置备份|*.zip" };
+            if (app.ShowModal(() => dialog.ShowDialog()) != true) return;
+            try
+            {
+                await app.RunBackground("正在备份配置和移动记录…", delegate(Settings state, Func<bool> cancelled, Action<int, int, string> progress)
+                { app.Store.Save(state); ProfileBackup.Export(dialog.FileName, app.Store, app.Organizer); return true; });
+                SetStatus("已备份布局、移动记录和历史归档；不含真实文件。此备份含私人路径，请勿公开上传。");
+            }
+            catch (Exception ex) { MessageBox.Show("备份未完成：" + ex.Message, "清桌"); }
+        }
+        async void ArchiveHistory()
+        {
+            try
+            {
+                int count = await app.RunBackground("正在归档历史…", delegate(Settings state, Func<bool> cancelled, Action<int, int, string> progress)
+                { if (app.Organizer == null) throw new IOException("移动记录不可读。"); return app.Organizer.ArchiveCompleted(); });
+                SetStatus("已归档 " + count + " 批完成记录，待恢复项目保持可用。");
+            }
+            catch (Exception ex) { MessageBox.Show("归档未完成：" + ex.Message, "清桌"); }
         }
     }
 
@@ -871,7 +937,7 @@ namespace ClearDesk
             Background = Brushes.Transparent; Foreground = Brushes.White; FontFamily = new FontFamily("Microsoft YaHei UI");
             Rect area = new Rect(SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop, SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
             Left = Math.Max(area.Left, Math.Min(zone.X, area.Right - Width)); Top = Math.Max(area.Top, Math.Min(zone.Y, area.Bottom - Height));
-            if (!Forms.Screen.AllScreens.Any(s => new Rect(s.WorkingArea.X, s.WorkingArea.Y, s.WorkingArea.Width, s.WorkingArea.Height).IntersectsWith(new Rect(Left, Top, Width, Height)))) { Left = SystemParameters.WorkArea.Left + 20; Top = SystemParameters.WorkArea.Top + 20; }
+            DesktopWindows.EnsureAccessible(this);
             var border = new Border { Background = Theme.Gray(zone.BackgroundOpacity), BorderBrush = Theme.Brush("#66FFFFFF"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10), ClipToBounds = true }; Content = border;
             var frame = new Grid(); border.Child = frame;
             var root = new DockPanel(); frame.Children.Add(root);
@@ -1012,8 +1078,9 @@ namespace ClearDesk
             Add(menu, zone.Pinned ? "取消置顶" : "置顶显示", delegate { zone.Pinned = !zone.Pinned; Topmost = zone.Pinned; app.Save(); });
             Add(menu, "打开管理窗口", app.ShowManager);
             Add(menu, "隐藏所有分区", app.ToggleWidgets);
+            app.ProtectMenu(menu);
             return menu;
         }
-        static void Add(ContextMenu menu, string name, Action action) { var m = new MenuItem { Header = name }; m.Click += delegate { action(); }; menu.Items.Add(m); }
+        void Add(ContextMenu menu, string name, Action action) { var m = new MenuItem { Header = name }; m.Click += delegate { if (!app.FileOperationBusy) action(); }; menu.Items.Add(m); }
     }
 }

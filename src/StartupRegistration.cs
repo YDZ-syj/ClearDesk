@@ -7,6 +7,7 @@ namespace ClearDesk
     public sealed class LaunchOptions
     {
         public bool AutoStart;
+        public bool Demo;
         public string Profile;
         public string Desktop;
         public static LaunchOptions Parse(string[] args)
@@ -15,12 +16,14 @@ namespace ClearDesk
             for (int i = 0; i < args.Length; i++)
             {
                 if (args[i] == "--autostart") { options.AutoStart = true; continue; }
+                if (args[i] == "--demo") { options.Demo = true; continue; }
                 if (args[i] != "--profile" && args[i] != "--desktop") throw new ArgumentException("未知启动参数：" + args[i]);
                 string flag = args[i];
                 if (++i >= args.Length || string.IsNullOrWhiteSpace(args[i]) || args[i].StartsWith("--")) throw new ArgumentException("启动参数缺少路径。");
                 string path = Path.GetFullPath(args[i]);
                 if (flag == "--profile") options.Profile = path; else options.Desktop = path;
             }
+            if (options.Demo && (options.Profile == null || options.Desktop == null)) throw new ArgumentException("演示模式需要指定独立的 --profile 和 --desktop。");
             return options;
         }
     }

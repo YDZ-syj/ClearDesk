@@ -4,12 +4,24 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Media;
+using System.Collections.Generic;
 
 namespace ClearDesk
 {
     public class MovePreviewDialog : Window
     {
         public bool ChangeFolder;
+        public sealed class Selection
+        {
+            public bool Selected { get; set; }
+            public FileMove Move { get; set; }
+            public string Name { get; set; }
+            public string Zone { get; set; }
+            public string From { get; set; }
+            public string To { get; set; }
+        }
+        public readonly List<Selection> Rows = new List<Selection>();
+        public List<FileMove> SelectedMoves { get { return Rows.Where(r => r.Selected).Select(r => r.Move).ToList(); } }
         public MovePreviewDialog(Settings state, MoveBatch batch, bool undo)
         {
             Title = undo ? "撤销整理 · 预览" : "整理桌面 · 移动预览"; Width = 940; Height = 620; MinWidth = 740; MinHeight = 440;
@@ -32,20 +44,26 @@ namespace ClearDesk
             if (!undo) buttons.Children.Add(Theme.Button("更换收纳目录…", delegate { ChangeFolder = true; DialogResult = true; }, false));
             buttons.Children.Add(Theme.Button("取消", delegate { DialogResult = false; }, false));
             var confirm = Theme.Button(undo ? "确认撤销" : "确认移动 " + moves.Count + " 项", delegate { DialogResult = true; }, true); confirm.IsEnabled = moves.Count > 0; buttons.Children.Add(confirm);
-            var grid = new DataGrid { AutoGenerateColumns = false, IsReadOnly = true, CanUserAddRows = false, CanUserDeleteRows = false, Background = Theme.Brush("#22283A"), Foreground = Theme.Brush("#1B2235"), RowBackground = Theme.Brush("#E2E5ED"), AlternatingRowBackground = Theme.Brush("#F0F2F7"), GridLinesVisibility = DataGridGridLinesVisibility.Horizontal, Margin = new Thickness(0, 18, 0, 0), HeadersVisibility = DataGridHeadersVisibility.Column };
+            var grid = new DataGrid { AutoGenerateColumns = false, CanUserAddRows = false, CanUserDeleteRows = false, Background = Theme.Brush("#22283A"), Foreground = Theme.Brush("#1B2235"), RowBackground = Theme.Brush("#E2E5ED"), AlternatingRowBackground = Theme.Brush("#F0F2F7"), GridLinesVisibility = DataGridGridLinesVisibility.Horizontal, Margin = new Thickness(0, 18, 0, 0), HeadersVisibility = DataGridHeadersVisibility.Column };
+            var selectionTemplate = (DataTemplate)System.Windows.Markup.XamlReader.Parse("<DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><CheckBox IsChecked='{Binding Selected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}' HorizontalAlignment='Center' VerticalAlignment='Center'/></DataTemplate>");
+            grid.Columns.Add(new DataGridTemplateColumn { Header = "选择", CellTemplate = selectionTemplate, Width = 55 });
             grid.Columns.Add(new DataGridTextColumn { Header = "名称", Binding = new Binding("Name"), Width = 160 });
             grid.Columns.Add(new DataGridTextColumn { Header = "分区", Binding = new Binding("Zone"), Width = 70 });
             grid.Columns.Add(new DataGridTextColumn { Header = "当前位置", Binding = new Binding("From"), Width = 285 });
             grid.Columns.Add(new DataGridTextColumn { Header = "移动到", Binding = new Binding("To"), Width = 285 });
             foreach (DataGridTextColumn column in grid.Columns.OfType<DataGridTextColumn>())
             {
+                column.IsReadOnly = true;
                 var cell = new Style(typeof(TextBlock));
                 cell.Setters.Add(new Setter(TextBlock.TextWrappingProperty, TextWrapping.Wrap));
                 cell.Setters.Add(new Setter(FrameworkElement.MarginProperty, new Thickness(4)));
                 cell.Setters.Add(new Setter(FrameworkElement.ToolTipProperty, new Binding(((Binding)column.Binding).Path.Path)));
                 column.ElementStyle = cell;
             }
-            grid.ItemsSource = moves.Select(m => new { Name = System.IO.Path.GetFileName(m.Source), Zone = state.Zones.Where(z => z.Id == m.ZoneId).Select(z => z.Name).FirstOrDefault() ?? "已删除分区", From = undo ? m.Destination : m.Source, To = undo ? m.Source : m.Destination }).ToList();
+            Rows.AddRange(moves.Select(m => new Selection { Selected = true, Move = m, Name = System.IO.Path.GetFileName(m.Source), Zone = state.Zones.Where(z => z.Id == m.ZoneId).Select(z => z.Name).FirstOrDefault() ?? "已删除分区", From = undo ? m.Destination : m.Source, To = undo ? m.Source : m.Destination }));
+            grid.ItemsSource = Rows;
+            confirm.Content = undo ? "恢复勾选项目" : "移动勾选项目";
+            description.Text += "\n取消勾选可保留某些项目；仅处理勾选项。";
             panel.Children.Add(grid);
         }
     }

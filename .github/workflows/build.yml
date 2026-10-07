@@ -28,6 +28,7 @@ jobs:
           path: |
             dist/ClearDesk-*-windows.zip
             dist/ClearDesk-*-source.zip
+            dist/ClearDesk-*.exe
             dist/SHA256SUMS-*.txt
   release:
     if: startsWith(github.ref, 'refs/tags/v')

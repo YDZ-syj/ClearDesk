@@ -7,6 +7,8 @@ obj/
 *.log
 settings.json*
 moves.json*
+history-archives/
+*profile-backup*.zip
 *.tmp
 .env
 .env.*

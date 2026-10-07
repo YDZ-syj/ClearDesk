@@ -12,6 +12,9 @@ namespace ClearDesk
         public static void Run(Action<bool, string> check, string root, DeskApp app, ManagerWindow manager)
         {
             check(!LaunchOptions.Parse(new string[0]).AutoStart, "manual launch keeps the management window visible");
+            check(LaunchOptions.Parse(new[] { "--demo", "--profile", root, "--desktop", root }).Demo, "demo launch requires and preserves isolated paths");
+            bool invalidDemo = false; try { LaunchOptions.Parse(new[] { "--demo" }); } catch (ArgumentException) { invalidDemo = true; }
+            check(invalidDemo, "demo launch cannot accidentally fall back to the real profile or desktop");
             var options = LaunchOptions.Parse(new[] { "--profile", root, "--autostart", "--desktop", root });
             check(options.AutoStart && options.Profile == Path.GetFullPath(root) && options.Desktop == Path.GetFullPath(root), "autostart flag does not consume profile or desktop arguments");
             bool rejected = false;

@@ -1,4 +1,4 @@
-param([string]$Version = '0.5.1', [string]$ReleaseDirectory = 'dist\v0.5.1')
+param([string]$Version = '0.6.0', [string]$ReleaseDirectory = 'dist\v0.6.0')
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Expected a numeric version.' }
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -9,7 +9,7 @@ New-Item -ItemType Directory -Path $sourceRoot | Out-Null
 $sourceNames = @('src','tests','assets','tools','.github','.gitignore','README.md','LICENSE','CHANGELOG.md','CONTRIBUTING.md','build.ps1','ClearDesk.csproj')
 foreach ($name in $sourceNames) { Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $sourceRoot -Recurse }
 # Include only public documentation; never recursively package local review materials.
-$docNames = @('RELEASE_NOTES_0.5.0.md',('RELEASE_NOTES_' + $Version + '.md'),'RESEARCH.md','TESTING.md','desktop-smoke-0.5.0.json','manager-preview.png') | Select-Object -Unique
+$docNames = @('RELEASE_NOTES_0.5.0.md','RELEASE_NOTES_0.5.1.md',('RELEASE_NOTES_' + $Version + '.md'),'RESEARCH.md','TESTING.md','desktop-smoke-0.5.0.json','manager-preview.png') | Select-Object -Unique
 New-Item -ItemType Directory -Path (Join-Path $sourceRoot 'docs') | Out-Null
 foreach ($name in $docNames) { Copy-Item -LiteralPath (Join-Path $projectRoot ('docs\' + $name)) -Destination (Join-Path $sourceRoot 'docs') }
 $sourceFiles = @(Get-ChildItem -LiteralPath $sourceRoot -File -Recurse -Force)
@@ -22,13 +22,15 @@ $tempZip = Join-Path $distRoot ([Guid]::NewGuid().ToString('N') + '.zip')
 Move-Item -LiteralPath $tempZip -Destination $sourceZip -Force
 $runtimeRoot = Join-Path $distRoot ('runtime-package-' + $Version + '-' + [Guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Path $runtimeRoot | Out-Null
-foreach ($name in @('ClearDesk.exe','ClearDesk.exe.config','ClearDesk.IconGuard.exe')) { Copy-Item -LiteralPath (Join-Path $releaseRoot $name) -Destination $runtimeRoot }
+foreach ($name in @('ClearDesk.exe','ClearDesk.exe.config')) { Copy-Item -LiteralPath (Join-Path $releaseRoot $name) -Destination $runtimeRoot }
 foreach ($name in @('README.md','LICENSE','CHANGELOG.md','assets')) { Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $runtimeRoot -Recurse }
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs') -Destination $runtimeRoot -Recurse
 $runtimeZip = Join-Path $distRoot ('ClearDesk-' + $Version + '-windows.zip')
 $tempZip = Join-Path $distRoot ([Guid]::NewGuid().ToString('N') + '.zip')
 [IO.Compression.ZipFile]::CreateFromDirectory($runtimeRoot,$tempZip)
 Move-Item -LiteralPath $tempZip -Destination $runtimeZip -Force
-Get-FileHash -LiteralPath $sourceZip,$runtimeZip -Algorithm SHA256 | ForEach-Object { $_.Hash.ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($_.Path) } | Set-Content -LiteralPath (Join-Path $distRoot ('SHA256SUMS-' + $Version + '.txt')) -Encoding ASCII
+$standalone = Join-Path $distRoot ('ClearDesk-' + $Version + '.exe')
+Copy-Item -LiteralPath (Join-Path $releaseRoot 'ClearDesk.exe') -Destination $standalone -Force
+Get-FileHash -LiteralPath $sourceZip,$runtimeZip,$standalone -Algorithm SHA256 | ForEach-Object { $_.Hash.ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($_.Path) } | Set-Content -LiteralPath (Join-Path $distRoot ('SHA256SUMS-' + $Version + '.txt')) -Encoding ASCII
 Write-Host "Source package: $sourceZip"
 Write-Host "Windows package: $runtimeZip"

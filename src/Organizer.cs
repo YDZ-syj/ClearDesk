@@ -6,6 +6,8 @@ using System.Runtime.InteropServices;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using Microsoft.Win32.SafeHandles;
+using System.Text;
+using System.ComponentModel;
 
 namespace ClearDesk
 {
@@ -53,6 +55,37 @@ namespace ClearDesk
         static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Information info);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, IntPtr data, uint size);
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct RenameInformation { public uint Replace; public IntPtr Root; public uint Length; public char Name; }
+        static string FromHandle(SafeFileHandle handle)
+        {
+            Information info;
+            if (handle.IsInvalid || !GetFileInformationByHandle(handle, out info)) throw new IOException("无法读取文件标识。", new Win32Exception(Marshal.GetLastWin32Error()));
+            if (info.IndexHigh == 0 && info.IndexLow == 0) throw new IOException("当前文件系统不提供稳定文件标识。");
+            if ((info.Attributes & 0x400) != 0) throw new IOException("不能移动重解析链接或云端占位文件。");
+            return info.Volume.ToString("X8") + ":" + info.IndexHigh.ToString("X8") + info.IndexLow.ToString("X8");
+        }
+        public static void MoveVerified(string source, string destination, string expected)
+        {
+            // Deny concurrent delete/rename; verify and rename the same open object.
+            using (var handle = CreateFile(source, 0x10080, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero))
+            {
+                if (FromHandle(handle) != expected) throw new IOException("文件已被替换，已停止移动：" + source);
+                byte[] name = Encoding.Unicode.GetBytes(Catalog.Normalize(destination));
+                int offset = Marshal.OffsetOf(typeof(RenameInformation), "Name").ToInt32();
+                int length = offset + name.Length + 2; IntPtr buffer = Marshal.AllocHGlobal(length);
+                try
+                {
+                    Marshal.Copy(new byte[length], 0, buffer, length);
+                    Marshal.WriteInt32(buffer, Marshal.OffsetOf(typeof(RenameInformation), "Length").ToInt32(), name.Length);
+                    Marshal.Copy(name, 0, IntPtr.Add(buffer, offset), name.Length);
+                    if (!SetFileInformationByHandle(handle, 3, buffer, (uint)length)) throw new IOException("文件无法移动，原文件和同名目标均保留。", new Win32Exception(Marshal.GetLastWin32Error()));
+                }
+                finally { Marshal.FreeHGlobal(buffer); }
+            }
+        }
         public static string Get(string path)
         {
             using (var handle = CreateFile(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero))
@@ -118,7 +151,7 @@ namespace ClearDesk
             string temp = HistoryPath + ".tmp";
             using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
             { new DataContractJsonSerializer(typeof(MoveHistory)).WriteObject(stream, History); stream.Flush(true); }
-            if (File.Exists(HistoryPath)) File.Replace(temp, HistoryPath, HistoryPath + ".bak"); else File.Move(temp, HistoryPath);
+            AtomicFile.Commit(temp, HistoryPath, HistoryPath + ".bak");
         }
         public MoveBatch Plan(Settings state, string desktop, string library, string runningDirectory)
         {
@@ -156,12 +189,18 @@ namespace ClearDesk
             if (name.Length > 64 || !System.Text.RegularExpressions.Regex.IsMatch(name, "^[a-zA-Z0-9_-]+$")) throw new InvalidDataException("分区标识不能用作收纳目录。");
             return name;
         }
-        static void Remap(Settings state, string source, string destination)
+        static void Remap(Settings state, string source, string destination, string identity)
         {
             foreach (Entry entry in state.Zones.SelectMany(z => z.Items).Concat(state.DesktopItems.Select(d => d.Entry)))
             {
-                if (Equal(entry.Path, source)) entry.Path = destination;
-                else if (Inside(entry.Path, source)) entry.Path = destination + entry.Path.Substring(source.Length);
+                if (Equal(entry.Path, source))
+                { if (!string.IsNullOrEmpty(entry.Identity) && entry.Identity != identity) continue; entry.Path = destination; entry.Name = Path.GetFileName(destination); entry.Identity = identity; }
+                else if (Inside(entry.Path, source))
+                {
+                    string target = destination + entry.Path.Substring(source.Length);
+                    if (!string.IsNullOrEmpty(entry.Identity)) { try { if (FileIdentity.Get(target) != entry.Identity) continue; } catch { continue; } }
+                    entry.Path = target;
+                }
             }
         }
         static void Move(FileMove move, bool undo)
@@ -175,27 +214,36 @@ namespace ClearDesk
                 if (undo) throw new IOException("原桌面目录不存在，无法撤销。");
                 System.IO.Directory.CreateDirectory(Path.GetDirectoryName(to));
             }
-            if (move.Directory) System.IO.Directory.Move(from, to); else File.Move(from, to);
+            FileIdentity.MoveVerified(from, to, move.Identity);
         }
-        public List<string> Execute(Settings state, MoveBatch batch, Action persistSettings)
+        public List<string> Execute(Settings state, MoveBatch batch, Action persistSettings, Func<bool> cancelled = null, Action<int, int, string> progress = null)
         {
             ValidateRoots(batch.Desktop, batch.Library);
             if (History.Batches.Any(b => b.Moves.Any(m => m.Status == "pending" || m.Status == "undoing"))) throw new IOException("有尚未恢复的整理操作，请重新启动清桌。");
-            if (History.Batches.Count >= 1000) throw new IOException("整理历史已达到容量上限，请先备份历史文件。");
+            if (History.Batches.Count >= 900) ArchiveCompleted();
+            if (History.Batches.Count >= 1000) throw new IOException("有过多待恢复批次，请先恢复或处理这些文件。");
             if (History.Batches.Any(b => b.Id == batch.Id)) throw new IOException("这份预览已经执行过，请重新预览。");
             foreach (FileMove move in batch.Moves)
             { ValidateMove(batch, move); if (!state.Zones.Any(z => z.Id == move.ZoneId)) throw new IOException("分区已变化，请重新预览。"); }
+            if (cancelled != null && cancelled()) return new List<string>();
             History.Batches.Add(batch); SaveHistory(); // Record intent durably before touching any source.
             var errors = new List<string>();
+            int completed = 0;
             foreach (FileMove move in batch.Moves)
             {
+                if (cancelled != null && cancelled())
+                {
+                    foreach (FileMove unstarted in batch.Moves.Where(m => m.Status == "pending")) { unstarted.Status = "failed"; unstarted.Error = "用户取消，原文件未移动。"; }
+                    SaveHistory(); break;
+                }
                 try { Move(move, false); }
-                catch (Exception ex) { move.Status = "failed"; move.Error = ex.Message; errors.Add(ex.Message); SaveHistory(); continue; }
+                catch (Exception ex) { move.Status = "failed"; move.Error = ex.Message; errors.Add(ex.Message); SaveHistory(); if (progress != null) progress(++completed, batch.Moves.Count, Path.GetFileName(move.Source)); continue; }
                 move.Status = "moved"; move.Error = null; SaveHistory();
-                Remap(state, move.Source, move.Destination);
+                Remap(state, move.Source, move.Destination, move.Identity);
                 Catalog.Add(state.Zones.First(z => z.Id == move.ZoneId), new[] { move.Destination });
                 persistSettings(); // If saving fails, stop. Startup recovery uses the durable journal.
                 move.SettingsApplied = true; SaveHistory();
+                if (progress != null) progress(++completed, batch.Moves.Count, Path.GetFileName(move.Source));
             }
             return errors;
         }
@@ -208,7 +256,7 @@ namespace ClearDesk
             try { Move(move, true); }
             catch (Exception ex) { move.Status = "blocked"; move.Error = ex.Message; SaveHistory(); throw; }
             move.Status = "undone"; move.Error = null; SaveHistory();
-            Remap(state, move.Destination, move.Source); entry.Path = move.Source;
+            Remap(state, move.Destination, move.Source, move.Identity); entry.Path = move.Source;
             persistSettings(); move.UndoApplied = true; SaveHistory(); return true;
         }
         public void RecordExternalMove(string path)
@@ -216,31 +264,64 @@ namespace ClearDesk
             foreach (FileMove move in History.Batches.SelectMany(b => b.Moves).Where(m => Equal(m.Destination, path) && m.Status == "moved")) move.Status = "exported";
             SaveHistory();
         }
-        public List<string> UndoAll(Settings state, Action persistSettings)
+        public List<string> UndoAll(Settings state, Action persistSettings, Func<bool> cancelled = null, Action<int, int, string> progress = null)
         {
             var errors = new List<string>();
             foreach (MoveBatch batch in History.Batches.AsEnumerable().Reverse().ToList())
-                if (batch.Moves.Any(m => m.Status == "moved" || m.Status == "blocked" || m.Status == "undoing")) errors.AddRange(UndoBatchFiles(state, batch, persistSettings));
-            return errors;
-        }
-        public List<string> Undo(Settings state, Action persistSettings)
-        {
-            MoveBatch batch = UndoBatch;
-            return batch == null ? new List<string>() : UndoBatchFiles(state, batch, persistSettings);
-        }
-        List<string> UndoBatchFiles(Settings state, MoveBatch batch, Action persistSettings)
-        {
-            var errors = new List<string>();
-            foreach (FileMove move in batch.Moves.AsEnumerable().Reverse().Where(m => m.Status == "moved" || m.Status == "undoing" || m.Status == "blocked"))
             {
-                move.Status = "undoing"; SaveHistory();
-                try { Move(move, true); }
-                catch (Exception ex) { move.Status = "blocked"; move.Error = ex.Message; errors.Add(ex.Message); SaveHistory(); continue; }
-                move.Status = "undone"; move.Error = null; SaveHistory();
-                Remap(state, move.Destination, move.Source); persistSettings();
-                move.UndoApplied = true; SaveHistory();
+                if (cancelled != null && cancelled()) break;
+                if (batch.Moves.Any(m => m.Status == "moved" || m.Status == "blocked" || m.Status == "undoing")) errors.AddRange(UndoBatchFiles(state, batch, persistSettings, null, cancelled, progress));
             }
             return errors;
+        }
+        public List<string> Undo(Settings state, Action persistSettings, Func<bool> cancelled = null, Action<int, int, string> progress = null)
+        {
+            MoveBatch batch = UndoBatch;
+            return batch == null ? new List<string>() : UndoBatchFiles(state, batch, persistSettings, null, cancelled, progress);
+        }
+        public List<string> UndoSelected(Settings state, MoveBatch batch, IEnumerable<FileMove> selected, Action persistSettings, Func<bool> cancelled = null, Action<int, int, string> progress = null)
+        {
+            if (!History.Batches.Contains(batch)) throw new InvalidDataException("整理记录已变化，请重新预览。");
+            var selection = new HashSet<FileMove>(selected);
+            if (selection.Any(m => !batch.Moves.Contains(m))) throw new InvalidDataException("恢复选择不属于此批次。");
+            return UndoBatchFiles(state, batch, persistSettings, selection, cancelled, progress);
+        }
+        List<string> UndoBatchFiles(Settings state, MoveBatch batch, Action persistSettings, HashSet<FileMove> selected, Func<bool> cancelled, Action<int, int, string> progress)
+        {
+            var errors = new List<string>();
+            var moves = batch.Moves.AsEnumerable().Reverse().Where(m => (selected == null || selected.Contains(m)) && (m.Status == "moved" || m.Status == "undoing" || m.Status == "blocked")).ToList();
+            int completed = 0;
+            foreach (FileMove move in moves)
+            {
+                if (cancelled != null && cancelled()) break;
+                move.Status = "undoing"; SaveHistory();
+                try { Move(move, true); }
+                catch (Exception ex) { move.Status = "blocked"; move.Error = ex.Message; errors.Add(ex.Message); SaveHistory(); if (progress != null) progress(++completed, moves.Count, Path.GetFileName(move.Source)); continue; }
+                move.Status = "undone"; move.Error = null; SaveHistory();
+                Remap(state, move.Destination, move.Source, move.Identity); persistSettings();
+                move.UndoApplied = true; SaveHistory();
+                if (progress != null) progress(++completed, moves.Count, Path.GetFileName(move.Source));
+            }
+            return errors;
+        }
+        public void UpdateRenamedDestination(string previous, string current, string identity)
+        {
+            bool changed = false;
+            foreach (FileMove move in History.Batches.SelectMany(b => b.Moves).Where(m => m.Status == "moved" || m.Status == "blocked"))
+                if (Equal(move.Destination, previous) && move.Identity == identity) { move.Destination = current; changed = true; }
+            if (changed) SaveHistory();
+        }
+        public int ArchiveCompleted()
+        {
+            var completed = History.Batches.Where(b => b.Moves.All(m => m.Status == "undone" || m.Status == "failed" || m.Status == "exported")).ToList();
+            if (completed.Count == 0) return 0;
+            string directory = Path.Combine(Path.GetDirectoryName(HistoryPath), "history-archives"); Directory.CreateDirectory(directory);
+            string archive = Path.Combine(directory, "history-" + Guid.NewGuid().ToString("N") + ".json");
+            using (var stream = new FileStream(archive, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            { new DataContractJsonSerializer(typeof(MoveHistory)).WriteObject(stream, new MoveHistory { Batches = completed }); stream.Flush(true); }
+            var original = History.Batches; History.Batches = original.Except(completed).ToList();
+            try { SaveHistory(); } catch { History.Batches = original; throw; }
+            return completed.Count;
         }
         public List<string> Recover(Settings state, Action persistSettings)
         {
@@ -256,12 +337,13 @@ namespace ClearDesk
                         bool atDestination = Exists(move.Destination) && FileIdentity.Get(move.Destination) == move.Identity;
                         if (move.Status == "undone")
                         {
-                            if (atSource && !move.UndoApplied) { Remap(state, move.Destination, move.Source); changed = true; }
+                            if (atSource && !move.UndoApplied) { Remap(state, move.Destination, move.Source, move.Identity); changed = true; }
                             continue;
                         }
                         if (atDestination && !atSource)
                         {
-                            move.Status = "moved"; Remap(state, move.Source, move.Destination);
+                            move.Status = "moved";
+                            if (!move.SettingsApplied) Remap(state, move.Source, move.Destination, move.Identity);
                             Zone zone = state.Zones.FirstOrDefault(z => z.Id == move.ZoneId);
                             if (zone != null && !move.SettingsApplied) Catalog.Add(zone, new[] { move.Destination });
                             changed = true;
@@ -269,7 +351,7 @@ namespace ClearDesk
                         else if (atSource && !atDestination)
                         {
                             if (move.Status == "pending") move.Status = "failed"; else move.Status = "undone";
-                            Remap(state, move.Destination, move.Source); changed = true;
+                            Remap(state, move.Destination, move.Source, move.Identity); changed = true;
                         }
                         else if (move.Status != "undone")
                         { move.Status = "blocked"; move.Error = "无法确认文件位置，请检查整理记录：" + move.Source; errors.Add(move.Error); changed = true; }

@@ -17,6 +17,7 @@
   <ItemGroup>
     <Reference Include="System"/><Reference Include="System.Core"/><Reference Include="System.Net.Http"/><Reference Include="System.Runtime.Serialization"/>
     <Reference Include="System.Drawing"/><Reference Include="System.Windows.Forms"/><Reference Include="System.Xaml"/>
+    <Reference Include="System.IO.Compression"/><Reference Include="System.IO.Compression.FileSystem"/>
     <Reference Include="WindowsBase"/><Reference Include="PresentationCore"/><Reference Include="PresentationFramework"/>
     <Compile Include="src\Core.cs"/><Compile Include="src\Organizer.cs"/><Compile Include="src\MovePreview.cs"/><Compile Include="src\App.cs"/>
     <Compile Include="src\DesktopIcons.cs"/><Compile Include="src\ZoneLayout.cs"/><Compile Include="src\RenameDialog.cs"/>
@@ -24,6 +25,7 @@
     <Compile Include="src\AppBrand.cs"/>
     <Compile Include="src\StartupRegistration.cs"/>
     <Compile Include="src\UpdateChecker.cs"/>
+    <Compile Include="src\AppOperations.cs"/><Compile Include="src\EntryTracking.cs"/><Compile Include="src\ProfileBackup.cs"/>
     <EmbeddedResource Include="assets\ClearDesk.ico"><LogicalName>ClearDesk.AppIcon</LogicalName></EmbeddedResource>
     <None Include="src\App.config"/><None Include="src\app.manifest"/>
   </ItemGroup>

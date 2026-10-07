@@ -12,6 +12,22 @@ namespace ClearDesk
 {
     public static class DesktopWindows
     {
+        public static Rect AccessibleBounds(Rect bounds, System.Collections.Generic.IEnumerable<Rect> areas)
+        {
+            var screens = areas.ToList();
+            if (screens.Any(area => { Rect intersection = Rect.Intersect(area, new Rect(bounds.X, bounds.Y, bounds.Width, Math.Min(52, bounds.Height))); return !intersection.IsEmpty && intersection.Width >= 80 && intersection.Height >= 24; })) return bounds;
+            Rect fallback = screens.FirstOrDefault(); if (fallback.IsEmpty || fallback.Width <= 0) return bounds;
+            return new Rect(fallback.Left + 16, fallback.Top + 16, Math.Min(bounds.Width, Math.Max(80, fallback.Width - 32)), Math.Min(bounds.Height, Math.Max(52, fallback.Height - 32)));
+        }
+        public static void EnsureAccessible(Window window)
+        {
+            // WPF coordinates are logical units; do not compare against physical Screen bounds.
+            var areas = System.Windows.Forms.Screen.AllScreens.Select(s => new Rect(s.WorkingArea.X, s.WorkingArea.Y, s.WorkingArea.Width, s.WorkingArea.Height));
+            var source = PresentationSource.FromVisual(window);
+            if (source != null && source.CompositionTarget != null) areas = areas.Select(r => { Point origin = source.CompositionTarget.TransformFromDevice.Transform(r.TopLeft); Point end = source.CompositionTarget.TransformFromDevice.Transform(r.BottomRight); return new Rect(origin, end); });
+            Rect bounds = AccessibleBounds(new Rect(window.Left, window.Top, window.Width, window.Height), areas);
+            window.Left = bounds.Left; window.Top = bounds.Top;
+        }
         [StructLayout(LayoutKind.Sequential)] public struct NativePoint { public int X, Y; }
         [DllImport("user32.dll")] static extern bool GetCursorPos(out NativePoint point);
         [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(NativePoint point);
@@ -64,7 +80,7 @@ namespace ClearDesk
     public static class DesktopTransfer
     {
         static bool Equal(string a, string b) { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
-        public static void Extract(Settings state, DesktopOrganizer organizer, Zone source, Entry entry, string desktop, double x, double y, Action persist)
+        public static void Extract(Settings state, DesktopOrganizer organizer, Zone source, Entry entry, string desktop, double x, double y, Action persist, Func<bool> cancelled = null)
         {
             if (!entry.Exists) throw new IOException("文件已移动或删除，无法拖出。");
             if (!entry.IsShell)
@@ -78,7 +94,19 @@ namespace ClearDesk
                         int suffix = 2; string stem = Path.GetFileNameWithoutExtension(destination), ext = Path.GetExtension(destination);
                         do { destination = Path.Combine(desktop, stem + " (" + suffix++ + ")" + ext); } while (File.Exists(destination) || Directory.Exists(destination));
                     }
-                    CheckLinks(entry.Path); Copy(entry.Path, destination); entry.Path = destination;
+                    if (Directory.Exists(entry.Path) && (Equal(Catalog.Normalize(entry.Path), Catalog.Normalize(desktop)) || Catalog.Normalize(desktop).StartsWith(Catalog.Normalize(entry.Path) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))) throw new IOException("不能将文件夹复制到自身内部。");
+                    CheckLinks(entry.Path);
+                    string staging = Path.Combine(desktop, ".cleardesk-copy-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(staging); string payload = Path.Combine(staging, "payload");
+                    string stagingIdentity = FileIdentity.Get(staging);
+                    try
+                    {
+                        Copy(entry.Path, payload, cancelled);
+                        if (cancelled != null && cancelled()) throw new OperationCanceledException("复制已取消，原文件保留。");
+                        FileIdentity.MoveVerified(payload, destination, FileIdentity.Get(payload));
+                        entry.Path = destination; entry.Identity = FileIdentity.Get(destination);
+                    }
+                    finally { if (Directory.Exists(staging) && FileIdentity.Get(staging) == stagingIdentity && (File.GetAttributes(staging) & FileAttributes.ReparsePoint) == 0) Directory.Delete(staging, true); }
                 }
             }
             foreach (Zone zone in state.Zones) zone.Items.RemoveAll(e => e == entry || Equal(e.Path, entry.Path));
@@ -91,14 +119,21 @@ namespace ClearDesk
             if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new IOException("链接或云端占位文件请先下载到本地再拖出。");
             if (Directory.Exists(path)) foreach (string child in Directory.EnumerateFileSystemEntries(path)) CheckLinks(child);
         }
-        static void Copy(string source, string destination)
+        static void Copy(string source, string destination, Func<bool> cancelled)
         {
+            if (cancelled != null && cancelled()) throw new OperationCanceledException("复制已取消，原文件保留。");
+            if ((File.GetAttributes(source) & FileAttributes.ReparsePoint) != 0) throw new IOException("不能复制重解析链接。");
             if (Directory.Exists(source))
             {
                 Directory.CreateDirectory(destination);
-                foreach (string child in Directory.EnumerateFileSystemEntries(source)) Copy(child, Path.Combine(destination, Path.GetFileName(child)));
+                foreach (string child in Directory.EnumerateFileSystemEntries(source)) Copy(child, Path.Combine(destination, Path.GetFileName(child)), cancelled);
             }
-            else File.Copy(source, destination, false);
+            else using (var input = File.OpenRead(source)) using (var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                byte[] buffer = new byte[1024 * 1024]; int read;
+                while ((read = input.Read(buffer, 0, buffer.Length)) > 0) { if (cancelled != null && cancelled()) throw new OperationCanceledException("复制已取消，原文件保留。"); output.Write(buffer, 0, read); }
+                output.Flush(true);
+            }
         }
     }
 
@@ -112,6 +147,7 @@ namespace ClearDesk
             Background = Brushes.Transparent;
             Left = Math.Max(SystemParameters.VirtualScreenLeft, Math.Min(model.X, SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth - Width));
             Top = Math.Max(SystemParameters.VirtualScreenTop, Math.Min(model.Y, SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight - Height));
+            DesktopWindows.EnsureAccessible(this);
             Content = new ItemTile(app, null, model.Entry, true);
             SourceInitialized += delegate { DesktopWindows.ToolWindow(this); };
             Closing += delegate(object sender, System.ComponentModel.CancelEventArgs e) { if (!disposing) e.Cancel = true; };

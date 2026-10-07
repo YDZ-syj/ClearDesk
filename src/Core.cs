@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
+using System.Threading;
 
 namespace ClearDesk
 {
@@ -12,8 +13,17 @@ namespace ClearDesk
     {
         [DataMember] public string Path { get; set; }
         [DataMember] public string Name { get; set; }
+        [DataMember(EmitDefaultValue = false)] public string Identity { get; set; }
         public bool IsShell { get { return Path == "shell:RecycleBinFolder" || Path == "shell:MyComputerFolder"; } }
-        public bool Exists { get { return IsShell || File.Exists(Path) || Directory.Exists(Path); } }
+        public bool Exists
+        {
+            get
+            {
+                if (IsShell) return true;
+                if (!File.Exists(Path) && !Directory.Exists(Path)) return false;
+                try { return string.IsNullOrEmpty(Identity) || FileIdentity.Get(Path) == Identity; } catch { return false; }
+            }
+        }
     }
 
     [DataContract]
@@ -133,10 +143,11 @@ namespace ClearDesk
                 string path;
                 try { path = Normalize(value); } catch (Exception) { continue; }
                 if (!File.Exists(path) && !Directory.Exists(path)) continue;
-                if (zone.Items.Any(x => string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase))) continue;
+                if (zone.Items.Any(x => string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase) && x.Exists)) continue;
                 string name = System.IO.Path.GetFileName(path);
                 if (string.IsNullOrEmpty(name)) name = path;
-                zone.Items.Add(new Entry { Path = path, Name = name }); count++;
+                string identity = null; try { identity = FileIdentity.Get(path); } catch { }
+                zone.Items.Add(new Entry { Path = path, Name = name, Identity = identity }); count++;
             }
             return count;
         }
@@ -148,7 +159,7 @@ namespace ClearDesk
                 string path;
                 try { path = Normalize(raw); } catch (Exception) { continue; }
                 if (!File.Exists(path) && !Directory.Exists(path)) continue;
-                if (settings.Zones.Any(z => z.Items.Any(e => string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase))) || settings.DesktopItems.Any(d => string.Equals(d.Entry.Path, path, StringComparison.OrdinalIgnoreCase))) continue;
+                if (settings.Zones.Any(z => z.Items.Any(e => string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase) && e.Exists)) || settings.DesktopItems.Any(d => string.Equals(d.Entry.Path, path, StringComparison.OrdinalIgnoreCase) && d.Entry.Exists)) continue;
                 string category = Category(path);
                 Zone zone = FindCategoryZone(settings, category);
                 count += Add(zone, new[] { path });
@@ -165,7 +176,7 @@ namespace ClearDesk
                 if (!Directory.Exists(root)) continue;
                 foreach (string path in Directory.EnumerateFileSystemEntries(root))
                 {
-                    if (System.IO.Path.GetFileName(path).Equals("desktop.ini", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (System.IO.Path.GetFileName(path).Equals("desktop.ini", StringComparison.OrdinalIgnoreCase) || System.IO.Path.GetFileName(path).StartsWith(".cleardesk-copy-", StringComparison.Ordinal)) continue;
                     if ((File.GetAttributes(path) & (FileAttributes.Hidden | FileAttributes.System)) != 0) continue;
                     list.Add(path);
                 }
@@ -178,6 +189,17 @@ namespace ClearDesk
     {
         public string FilePath { get; private set; }
         public SettingsStore(string path) { FilePath = path; }
+        public static Settings Clone(Settings state)
+        {
+            var serializer = new DataContractJsonSerializer(typeof(Settings));
+            using (var stream = new MemoryStream()) { serializer.WriteObject(stream, state); stream.Position = 0; return (Settings)serializer.ReadObject(stream); }
+        }
+        public static bool Equivalent(Settings left, Settings right)
+        {
+            var serializer = new DataContractJsonSerializer(typeof(Settings));
+            using (var a = new MemoryStream()) using (var b = new MemoryStream())
+            { serializer.WriteObject(a, left); serializer.WriteObject(b, right); return a.ToArray().SequenceEqual(b.ToArray()); }
+        }
         public Settings Load()
         {
             return File.Exists(FilePath) ? Read(FilePath) : Settings.Default();
@@ -219,8 +241,24 @@ namespace ClearDesk
             string temp = FilePath + ".tmp";
             using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
             { new DataContractJsonSerializer(typeof(Settings)).WriteObject(stream, s); stream.Flush(true); }
-            if (File.Exists(FilePath)) File.Replace(temp, FilePath, FilePath + ".bak");
-            else File.Move(temp, FilePath);
+            AtomicFile.Commit(temp, FilePath, FilePath + ".bak");
+        }
+    }
+    public static class AtomicFile
+    {
+        public static void Commit(string temp, string destination, string backup)
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                try { if (File.Exists(destination)) File.Replace(temp, destination, backup); else File.Move(temp, destination); return; }
+                catch (IOException ex)
+                {
+                    int error = ex.HResult & 0xFFFF;
+                    // Antivirus/indexers may briefly hold a file without delete sharing.
+                    if (attempt >= 6 || !File.Exists(temp) || (error != 32 && error != 33 && error != 1175 && error != 1176 && error != 1177)) throw;
+                    Thread.Sleep(25 * (attempt + 1));
+                }
+            }
         }
     }
 }
