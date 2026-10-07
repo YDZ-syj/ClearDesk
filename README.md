@@ -31,13 +31,17 @@
 - 拖出到桌面时恢复已整理文件；仅引用的外部文件会复制到个人桌面并保留外部原件。向其他应用拖放的移动由 Windows 和目标应用处理，不属于整理撤销范围。
 - 配置与移动历史位于 `%LOCALAPPDATA%\ClearDesk`。请连同收纳目录一起备份；配置导出不包含文件内容或移动历史。卸载前先恢复文件，不要把收纳目录当作缓存删除。
 
-## 动态壁纸
+## Wallpaper Engine 兼容性
 
-使用真正的透明窗口，不采样静态壁纸，不修改 Wallpaper Engine 设置或桌面宿主。若点击分区导致 Wallpaper Engine 暂停，可在其「设置 → 性能 → 应用规则」中为 `ClearDesk.exe` 设置 Keep Running，见[官方说明](https://help.wallpaperengine.io/en/functionality/applicationrules.html)。
+清桌采用半透明分区，Wallpaper Engine 的动态壁纸可以透过分区显示；程序不会替换壁纸或修改 Wallpaper Engine 的设置、桌面宿主。
 
-混合 DPI 和 Explorer 重启已通过作者本机手动验证。更多机器、虚拟桌面及不同动态壁纸类型仍需反馈，详见[测试记录](docs/TESTING.md)。
+本机交互测试期间 Wallpaper Engine 进程保持运行。不同视频、场景和 Web 壁纸，以及播放列表切换的兼容情况仍需进一步验证，详见[测试记录](docs/TESTING.md)。
+
+如果操作分区时壁纸暂停，请检查 Wallpaper Engine 的播放规则。可在「设置 → 性能 → 应用规则」中为 `ClearDesk.exe` 添加规则，条件设为正在运行（Is running），壁纸播放设为继续运行（Keep running），见[官方说明](https://help.wallpaperengine.io/en/functionality/applicationrules.html)。
 
 ## 从源码构建
+
+本节供修改源码或自行编译的开发者参考。直接使用软件请下载上方 Windows ZIP，解压后运行 `ClearDesk.exe`。
 
 使用 C# / WPF / .NET Framework，当前不依赖 NuGet 或 .NET SDK。在 Windows PowerShell 中运行：
 
